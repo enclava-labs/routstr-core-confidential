@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic.v1 import BaseModel, BaseSettings, Field
+from pydantic.v1 import BaseModel, BaseSettings, Field, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 
@@ -106,6 +107,84 @@ class Settings(BaseSettings):
         default=True, env="ENABLE_ANALYTICS_SHARING"
     )
 
+    # Routing policy
+    # disabled: normal cheapest/fallback routing
+    # required: only providers with current verified confidentiality are routable
+    confidential_routing_mode: str = Field(
+        default="disabled", env="CONFIDENTIAL_ROUTING_MODE"
+    )
+    routstr_tee_client_confidentiality_boundary: str = Field(
+        default="", env="ROUTSTR_TEE_CLIENT_CONFIDENTIALITY_BOUNDARY"
+    )
+    routstr_tee_attested_tls_public_key_digest: str = Field(
+        default="", env="ROUTSTR_TEE_ATTESTED_TLS_PUBLIC_KEY_DIGEST"
+    )
+    routstr_attestation_document_path: str = Field(
+        default="", env="ROUTSTR_TEE_ATTESTATION_DOCUMENT_PATH"
+    )
+    routstr_attestation_document_format: str = Field(
+        default="", env="ROUTSTR_TEE_ATTESTATION_DOCUMENT_FORMAT"
+    )
+    routstr_attestation_public_key: str = Field(
+        default="", env="ROUTSTR_TEE_PUBLIC_KEY"
+    )
+    routstr_attestation_public_key_path: str = Field(
+        default="", env="ROUTSTR_TEE_PUBLIC_KEY_PATH"
+    )
+    routstr_attestation_hpke_key_config_b64: str = Field(
+        default="", env="ROUTSTR_TEE_HPKE_KEY_CONFIG_B64"
+    )
+    routstr_attestation_hpke_key_config_path: str = Field(
+        default="", env="ROUTSTR_TEE_HPKE_KEY_CONFIG_PATH"
+    )
+    routstr_tee_attestation_command: str = Field(
+        default="", env="ROUTSTR_TEE_ATTESTATION_COMMAND"
+    )
+    routstr_tee_attestation_command_digest: str = Field(
+        default="", env="ROUTSTR_TEE_ATTESTATION_COMMAND_DIGEST"
+    )
+    routstr_tee_attestation_artifact_path: str = Field(
+        default="", env="ROUTSTR_TEE_ATTESTATION_ARTIFACT_PATH"
+    )
+    routstr_tee_attestation_required: bool = Field(
+        default=False, env="ROUTSTR_TEE_ATTESTATION_REQUIRED"
+    )
+    routstr_tee_verifier_command: str = Field(
+        default="", env="ROUTSTR_TEE_VERIFIER_COMMAND"
+    )
+    routstr_tee_verifier_command_digest: str = Field(
+        default="", env="ROUTSTR_TEE_VERIFIER_COMMAND_DIGEST"
+    )
+    routstr_tee_verifier_artifact_path: str = Field(
+        default="", env="ROUTSTR_TEE_VERIFIER_ARTIFACT_PATH"
+    )
+    routstr_tee_verifier_timeout_seconds: float = Field(
+        default=10.0, env="ROUTSTR_TEE_VERIFIER_TIMEOUT_SECONDS"
+    )
+    routstr_tee_verifier_policy_json: str = Field(
+        default="", env="ROUTSTR_TEE_VERIFIER_POLICY_JSON"
+    )
+
+    @validator("upstream_provider_fee")
+    def _validate_upstream_provider_fee(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("upstream_provider_fee must be finite")
+        if value <= 0:
+            raise ValueError("upstream_provider_fee must be positive")
+        return value
+
+    @validator("confidential_routing_mode")
+    def _validate_confidential_routing_mode(cls, value: str) -> str:
+        mode = str(value or "").strip().lower()
+        allowed_modes = {"disabled", "required", "require", "strict", "enforced"}
+        if mode not in allowed_modes:
+            raise ValueError(
+                "confidential_routing_mode must be one of: "
+                + ", ".join(sorted(allowed_modes))
+            )
+        return mode
+
+
 def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
     """Discard unknown keys from persisted settings."""
     normalized: dict[str, Any] = {}
@@ -116,6 +195,25 @@ def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
             normalized[key] = value
 
     return normalized
+
+
+ENV_AUTHORITATIVE_CONFIDENTIAL_SETTINGS = {
+    field
+    for field in Settings.__fields__
+    if field == "confidential_routing_mode"
+    or field.startswith("routstr_tee_")
+    or field.startswith("routstr_attestation_")
+}
+
+
+def _apply_env_authoritative_settings(
+    data: dict[str, Any], env_resolved: Settings
+) -> dict[str, Any]:
+    merged = dict(data)
+    env_data = env_resolved.dict()
+    for field in ENV_AUTHORITATIVE_CONFIDENTIAL_SETTINGS:
+        merged[field] = env_data[field]
+    return merged
 
 
 def _compute_primary_mint(cashu_mints: list[str]) -> str:
@@ -267,8 +365,15 @@ class SettingsService:
             valid_fields = set(env_resolved.dict().keys())
             merged_dict: dict[str, Any] = dict(env_resolved.dict())
             merged_dict.update(
-                {k: v for k, v in db_json.items() if v not in (None, "", [], {}) and k in valid_fields}
+                {
+                    k: v
+                    for k, v in db_json.items()
+                    if v not in (None, "", [], {})
+                    and k in valid_fields
+                    and k not in ENV_AUTHORITATIVE_CONFIDENTIAL_SETTINGS
+                }
             )
+            merged_dict = _apply_env_authoritative_settings(merged_dict, env_resolved)
             merged_dict = Settings(**merged_dict).dict()
 
             # Ensure primary_mint is consistent with cashu_mints if not explicitly set
@@ -300,7 +405,18 @@ class SettingsService:
     ) -> Settings:
         async with cls._lock:
             current = cls.get()
-            candidate_dict = {**current.dict(), **_normalize_settings_data(partial)}
+            normalized_partial = {
+                k: v
+                for k, v in _normalize_settings_data(partial).items()
+                if k not in ENV_AUTHORITATIVE_CONFIDENTIAL_SETTINGS
+            }
+            candidate_dict = {
+                **current.dict(),
+                **normalized_partial,
+            }
+            candidate_dict = _apply_env_authoritative_settings(
+                candidate_dict, resolve_bootstrap()
+            )
             candidate = Settings(**candidate_dict)
             from sqlmodel import text
 
@@ -335,8 +451,11 @@ class SettingsService:
             (data_str,) = row
             data = json.loads(data_str) if isinstance(data_str, str) else dict(data_str)
             valid_fields = set(settings.dict().keys())
+            env_resolved = resolve_bootstrap()
             # Update in-place
-            for k, v in data.items():
+            for k, v in _apply_env_authoritative_settings(
+                _normalize_settings_data(data), env_resolved
+            ).items():
                 if k in valid_fields:
                     setattr(settings, k, v)
             cls._current = settings

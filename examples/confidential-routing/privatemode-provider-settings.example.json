@@ -1,0 +1,38 @@
+{
+  "base_url": "http://127.0.0.1:8080/v1",
+  "confidentiality": {
+    "enabled": true,
+    "mode": "privatemode",
+    "model_ids": [
+      "privatemode/gpt-oss-120b"
+    ],
+    "policy": {
+      "manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "manifest_url": "https://cdn.confidential.cloud/privatemode/v2/manifest.json",
+      "proxy_binary_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "proxy_binary_path": "/opt/privatemode/privatemode-proxy",
+      "dump_requests": false,
+      "shared_prompt_cache": false,
+      "nvidia_ocsp_allow_unknown": false,
+      "nvidia_ocsp_revoked_grace_period_hours": 0,
+      "expected_trust_tier": "app-e2ee",
+      "expected_coordinator_measurement": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_secret_service_measurement": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "expected_ai_worker_measurement": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "expected_gpu_attestation_policy": "nvidia-ocsp-good-only",
+      "expected_key_release_binding": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "expected_workload_sans": [
+        "gpt-oss-120b.default.svc.cluster.local"
+      ],
+      "model_workload_bindings": {
+        "privatemode/gpt-oss-120b": {
+          "workload_sans": [
+            "gpt-oss-120b.default.svc.cluster.local"
+          ]
+        }
+      },
+      "verifier_command": "build/confidential-verifiers/routstr-privatemode-go-verifier",
+      "verifier_command_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  }
+}

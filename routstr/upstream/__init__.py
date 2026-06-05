@@ -9,8 +9,10 @@ from .ollama import OllamaUpstreamProvider
 from .openai import OpenAIUpstreamProvider
 from .openrouter import OpenRouterUpstreamProvider
 from .perplexity import PerplexityUpstreamProvider
-from .ppqai import PPQAIUpstreamProvider
+from .ppqai import PPQAIUpstreamProvider, PPQPrivateUpstreamProvider
+from .privatemode import PrivatemodeUpstreamProvider
 from .routstr import RoutstrUpstreamProvider
+from .tinfoil import TinfoilUpstreamProvider
 from .xai import XAIUpstreamProvider
 
 upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
@@ -24,8 +26,11 @@ upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
     OpenAIUpstreamProvider,
     OpenRouterUpstreamProvider,
     PerplexityUpstreamProvider,
+    PrivatemodeUpstreamProvider,
     PPQAIUpstreamProvider,
+    PPQPrivateUpstreamProvider,
     RoutstrUpstreamProvider,
+    TinfoilUpstreamProvider,
     XAIUpstreamProvider,
 ]
 """List of all upstream classes"""

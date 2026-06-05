@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 from typing import TYPE_CHECKING, Callable
@@ -12,10 +13,21 @@ from sqlmodel import select
 
 from ..core import get_logger
 from ..core.db import AsyncSession, ModelRow, UpstreamProviderRow, create_session
+from ..core.logging import redact_sensitive_text, redact_url_userinfo
 from ..payment.models import Model
 from .base import BaseUpstreamProvider
+from .strict_json import loads_strict_json
 
 logger = get_logger(__name__)
+
+
+def _provider_fee_is_finite(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) > 0
+    )
 
 
 def resolve_model_alias(
@@ -153,10 +165,12 @@ async def refresh_upstreams_models_periodically(
             for upstream in _resolve_upstreams():
                 try:
                     await upstream.refresh_models_cache()
+                    await _refresh_confidentiality_status_fail_closed(upstream)
                 except Exception as e:
+                    error = str(redact_sensitive_text(str(e)))
                     logger.error(
-                        f"Error refreshing models for {upstream.base_url}",
-                        extra={"error": str(e), "error_type": type(e).__name__},
+                        f"Error refreshing models for {redact_url_userinfo(upstream.base_url)}",
+                        extra={"error": error, "error_type": type(e).__name__},
                     )
 
             try:
@@ -182,6 +196,32 @@ async def refresh_upstreams_models_periodically(
             await asyncio.sleep(interval + random.uniform(0, jitter))
         except asyncio.CancelledError:
             break
+
+
+async def _refresh_confidentiality_status_fail_closed(
+    upstream: BaseUpstreamProvider,
+) -> None:
+    refresh_confidentiality = getattr(upstream, "refresh_confidentiality_status", None)
+    if not callable(refresh_confidentiality):
+        return
+    try:
+        await refresh_confidentiality()
+    except Exception as exc:
+        failure_reason = str(redact_sensitive_text(str(exc)))
+        current = upstream.confidentiality_status()
+        failed_status = current.copy(
+            update={
+                "verified": False,
+                "verified_at": None,
+                "expires_at": None,
+                "failure_reason": failure_reason,
+                "verifier": None,
+                "evidence_digest": None,
+                "verified_claims": {},
+            }
+        )
+        upstream.set_confidentiality_status(failed_status)
+        raise
 
 
 async def init_upstreams() -> list[BaseUpstreamProvider]:
@@ -210,7 +250,9 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
             provider_row: UpstreamProviderRow,
         ) -> BaseUpstreamProvider | None:
             if not provider_row.enabled:
-                logger.debug(f"Skipping disabled provider: {provider_row.base_url}")
+                logger.debug(
+                    f"Skipping disabled provider: {redact_url_userinfo(provider_row.base_url)}"
+                )
                 return None
 
             provider = _instantiate_provider(provider_row)
@@ -218,11 +260,12 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
                 # Keep provider DB id on runtime instance so model mapping can
                 # bind DB overrides to the correct upstream.
                 setattr(provider, "db_id", provider_row.id)
+                _configure_provider_confidentiality(provider, provider_row)
                 await provider.refresh_models_cache()
                 logger.debug(
                     f"Initialized {provider_row.provider_type} provider",
                     extra={
-                        "base_url": provider_row.base_url,
+                        "base_url": redact_url_userinfo(provider_row.base_url),
                         "models_cached": len(provider.get_cached_models()),
                     },
                 )
@@ -234,6 +277,71 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
         upstreams = [p for p in results if p is not None]
 
         return upstreams
+
+
+def _configure_provider_confidentiality(
+    provider: BaseUpstreamProvider, provider_row: UpstreamProviderRow
+) -> None:
+    """Apply provider_settings.confidentiality to runtime provider status."""
+    if not provider_row.provider_settings:
+        return
+
+    try:
+        provider_settings = loads_strict_json(
+            provider_row.provider_settings,
+            "provider_settings JSON",
+        )
+    except Exception as exc:
+        logger.warning(
+            "Ignoring invalid provider_settings JSON",
+            extra={
+                "provider_type": provider_row.provider_type,
+                "base_url": redact_url_userinfo(provider_row.base_url),
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+        )
+        return
+
+    if isinstance(provider_settings, dict):
+        provider.configure_confidentiality_from_settings(provider_settings)
+
+
+def _normalize_provider_base_url(value: str) -> str:
+    return value.strip().rstrip("/")
+
+
+def _confidential_provider_identity_violation(
+    provider_class: type[BaseUpstreamProvider],
+    provider_row: UpstreamProviderRow,
+) -> str | None:
+    provider_type = provider_row.provider_type
+    base_url = _normalize_provider_base_url(provider_row.base_url)
+
+    if provider_type not in {"tinfoil", "ppq-private", "privatemode"}:
+        return None
+
+    metadata = provider_class.get_provider_metadata()
+    default_base_url = _normalize_provider_base_url(
+        str(metadata.get("default_base_url") or "")
+    )
+    if (
+        metadata.get("fixed_base_url") is True
+        and base_url != default_base_url
+    ):
+        return f"Provider type {provider_type} requires base_url {default_base_url}"
+
+    if provider_type == "privatemode":
+        from .base import _privatemode_proxy_base_url_violation
+
+        return _privatemode_proxy_base_url_violation(base_url)
+
+    if provider_type == "ppq-private":
+        from .ppqai import _ppq_private_base_url_violation
+
+        return _ppq_private_base_url_violation(base_url)
+
+    return None
 
 
 async def _seed_providers_from_settings(
@@ -250,6 +358,10 @@ async def _seed_providers_from_settings(
 
     providers_to_add: list[UpstreamProviderRow] = []
     seeded_provider_keys: set[tuple[str, str]] = set()
+    provider_fee = getattr(settings, "upstream_provider_fee", 1.01)
+    if not _provider_fee_is_finite(provider_fee):
+        raise ValueError("UPSTREAM_PROVIDER_FEE must be a finite positive number")
+    provider_fee = float(provider_fee)
 
     provider_classes_by_type = {
         cls.provider_type: cls
@@ -285,6 +397,7 @@ async def _seed_providers_from_settings(
                             base_url=base_url,
                             api_key=api_key,
                             enabled=True,
+                            provider_fee=provider_fee,
                         )
                     )
                     seeded_provider_keys.add((base_url, api_key))
@@ -305,6 +418,7 @@ async def _seed_providers_from_settings(
                     base_url=ollama_base_url,
                     api_key=ollama_api_key,
                     enabled=True,
+                    provider_fee=provider_fee,
                 )
             )
             seeded_provider_keys.add((ollama_base_url, ollama_api_key))
@@ -327,6 +441,7 @@ async def _seed_providers_from_settings(
                         api_key=api_key,
                         api_version=settings.chat_completions_api_version,
                         enabled=True,
+                        provider_fee=provider_fee,
                     )
                 )
                 seeded_provider_keys.add((base_url, api_key))
@@ -348,6 +463,7 @@ async def _seed_providers_from_settings(
                         base_url=base_url,
                         api_key=api_key,
                         enabled=True,
+                        provider_fee=provider_fee,
                     )
                 )
                 seeded_provider_keys.add((base_url, api_key))
@@ -356,7 +472,7 @@ async def _seed_providers_from_settings(
         session.add(provider)
         logger.info(
             f"Seeding {provider.provider_type} provider",  # type: ignore[str-format]
-            extra={"base_url": provider.base_url},
+            extra={"base_url": redact_url_userinfo(provider.base_url)},
         )
 
 
@@ -374,6 +490,16 @@ def _instantiate_provider(
     from . import upstream_provider_classes
 
     try:
+        if not _provider_fee_is_finite(getattr(provider_row, "provider_fee", None)):
+            logger.error(
+                "Skipping provider with non-finite provider_fee",
+                extra={
+                    "provider_type": provider_row.provider_type,
+                    "base_url": redact_url_userinfo(provider_row.base_url),
+                },
+            )
+            return None
+
         provider_classes_by_type = {
             cls.provider_type: cls
             for cls in upstream_provider_classes  # type: ignore[attr-defined]
@@ -382,11 +508,24 @@ def _instantiate_provider(
         provider_class = provider_classes_by_type.get(provider_row.provider_type)
 
         if provider_class:
+            if violation := _confidential_provider_identity_violation(
+                provider_class,
+                provider_row,
+            ):
+                logger.error(
+                    "Skipping confidential provider with invalid identity",
+                    extra={
+                        "provider_type": provider_row.provider_type,
+                        "base_url": redact_url_userinfo(provider_row.base_url),
+                        "reason": violation,
+                    },
+                )
+                return None
             provider = provider_class.from_db_row(provider_row)  # type: ignore[attr-defined]
             if provider is None:
                 logger.error(
                     f"Failed to instantiate {provider_row.provider_type} provider",
-                    extra={"base_url": provider_row.base_url},
+                    extra={"base_url": redact_url_userinfo(provider_row.base_url)},
                 )
             return provider
 
@@ -397,7 +536,7 @@ def _instantiate_provider(
 
         logger.error(
             f"Unknown provider type: {provider_row.provider_type}",
-            extra={"base_url": provider_row.base_url},
+            extra={"base_url": redact_url_userinfo(provider_row.base_url)},
         )
         return None
     except Exception as e:
@@ -405,7 +544,7 @@ def _instantiate_provider(
             f"Failed to instantiate provider: {e}",
             extra={
                 "provider_type": provider_row.provider_type,
-                "base_url": provider_row.base_url,
+                "base_url": redact_url_userinfo(provider_row.base_url),
                 "error": str(e),
             },
         )

@@ -1,6 +1,10 @@
 from typing import TYPE_CHECKING
 
-from ..payment.models import Model, async_fetch_openrouter_models
+from ..payment.models import (
+    Model,
+    async_fetch_openrouter_models,
+    remote_model_without_public_proof,
+)
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
@@ -48,4 +52,8 @@ class PerplexityUpstreamProvider(BaseUpstreamProvider):
     async def fetch_models(self) -> list[Model]:
         """Fetch Perplexity models from OpenRouter API filtered by perplexity source."""
         models_data = await async_fetch_openrouter_models(source_filter="perplexity")
-        return [Model(**model) for model in models_data]  # type: ignore
+        return [
+            Model(**model)
+            for item in models_data
+            if (model := remote_model_without_public_proof(item)) is not None
+        ]

@@ -1,21 +1,158 @@
 import asyncio
+import hashlib
 import json
+import math
 import random
+import time
+from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel as V2BaseModel
-from pydantic.v1 import BaseModel
+from pydantic.v1 import BaseModel, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from ..core.confidentiality_public import (
+    is_full_sha256_digest,
+    public_confidentiality_policy_binds_provider_proof,
+    public_provider_proof_claims_cover_model_selectors,
+    public_provider_type_satisfies_mode,
+    public_verified_model_selectors_satisfy_provider,
+    verified_public_provider_proof_claims,
+)
 from ..core.db import ModelRow, UpstreamProviderRow, get_session
 from ..core.logging import get_logger
+from ..core.policy_secrets import inline_policy_secret_violations
 from ..core.settings import settings
 from .price import sats_usd_price
 
 logger = get_logger(__name__)
 
 models_router = APIRouter()
+
+
+PUBLIC_CONFIDENTIALITY_KEYS = {
+    "attestation_status",
+    "enabled",
+    "evidence_digest",
+    "expires_at",
+    "metadata_leakage",
+    "mode",
+    "model_id_prefixes",
+    "model_ids",
+    "policy_digest",
+    "provider_type",
+    "supported_endpoints",
+    "verified",
+    "verified_at",
+    "verified_claims_digest",
+    "verifier",
+}
+
+PUBLIC_CONFIDENTIALITY_LIST_KEYS = {
+    "metadata_leakage",
+    "model_id_prefixes",
+    "model_ids",
+    "supported_endpoints",
+}
+REMOTE_MODEL_PUBLIC_PROOF_FIELDS = {
+    "attestation_evidence_digest",
+    "attestation_provider",
+    "attestation_status",
+    "confidential",
+    "confidentiality",
+    "provider_attestation_status",
+    "routstr_tee",
+}
+PUBLIC_MODEL_CONFIDENTIALITY_POLICY_KEYS = {
+    "allowed_ai_worker_measurements",
+    "allowed_code_measurement_fingerprint",
+    "allowed_code_measurement_fingerprints",
+    "allowed_code_measurements",
+    "allowed_coordinator_measurements",
+    "allowed_enclave_measurement_fingerprint",
+    "allowed_enclave_measurement_fingerprints",
+    "allowed_enclave_measurements",
+    "allowed_gpu_attestation_policies",
+    "allowed_key_release_bindings",
+    "allowed_release_digest",
+    "allowed_release_digests",
+    "allowed_secret_service_measurements",
+    "attestation_bundle_url_digest",
+    "code_measurement_fingerprint",
+    "enclave_measurement_fingerprint",
+    "expectedWorkloadIDs",
+    "expectedWorkloadSANs",
+    "expected_ai_worker_measurement",
+    "expected_code_measurement_fingerprint",
+    "expected_coordinator_measurement",
+    "expected_enclave_measurement_fingerprint",
+    "expected_gpu_attestation_policy",
+    "expected_key_release_binding",
+    "expected_release_digest",
+    "expected_repo",
+    "expected_secret_service_measurement",
+    "expected_trust_tier",
+    "expected_workload_ids",
+    "expected_workload_identity_digest",
+    "expected_workload_sans",
+    "manifestDigest",
+    "manifest_digest",
+    "manifestLogDir",
+    "manifest_log_dir",
+    "modelAttestationTargets",
+    "modelEnclaveBindings",
+    "modelWorkloadBindings",
+    "model_attestation_targets",
+    "model_enclave_bindings",
+    "model_workload_binding_digest",
+    "model_workload_bindings",
+    "proxyBinaryDigest",
+    "proxyImageDigest",
+    "proxy_binary_digest",
+    "proxy_image_digest",
+    "release_digest",
+    "repo",
+    "requireModelAttestations",
+    "require_model_attestations",
+    "tinfoil_transport_security",
+    "transport_security",
+}
+
+
+def _public_model_confidentiality_policy(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or not value:
+        return None
+    if inline_policy_secret_violations(value):
+        return None
+
+    public: dict[str, Any] = {}
+    attestation_bundle_url = value.get("attestation_bundle_url")
+    if isinstance(attestation_bundle_url, str) and attestation_bundle_url.strip():
+        public["attestation_bundle_url_digest"] = _sha256_json_digest(
+            attestation_bundle_url.strip()
+        )
+
+    for key in PUBLIC_MODEL_CONFIDENTIALITY_POLICY_KEYS:
+        if key in value:
+            public[key] = value[key]
+    try:
+        json.dumps(public, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        return None
+    return public or None
+
+
+def _json_constant_rejecter(label: str):
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"{label} must not contain {value}")
+
+    return reject_constant
+
+
+def _loads_strict_json(data: str, label: str) -> Any:
+    return json.loads(data, parse_constant=_json_constant_rejecter(label))
 
 
 class Architecture(BaseModel):
@@ -38,6 +175,14 @@ class Pricing(BaseModel):
     max_prompt_cost: float = 0.0  # in sats not msats
     max_completion_cost: float = 0.0  # in sats not msats
     max_cost: float = 0.0  # in sats not msats
+
+    @validator("*")
+    def pricing_values_must_be_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("pricing values must be finite")
+        if value < 0:
+            raise ValueError("pricing values must be non-negative")
+        return value
 
 
 class TopProvider(BaseModel):
@@ -62,9 +207,229 @@ class Model(BaseModel):
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
     forwarded_model_id: str | None = None
+    supported_endpoints: list[str] | None = None
+    confidentiality: dict[str, Any] | None = None
+    last_seen_at: int | None = None
+    availability_status: str | None = None
+    capabilities_json: str | None = None
 
     def __hash__(self) -> int:
         return hash(self.id)
+
+
+def remote_model_without_public_proof(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    model = dict(value)
+    for key in REMOTE_MODEL_PUBLIC_PROOF_FIELDS:
+        model.pop(key, None)
+    return model
+
+
+def _sha256_json_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _public_string_list(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _strict_public_string_list(value: object) -> list[str] | None:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return None
+    values: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            return None
+        values.append(item.strip())
+    if len({value.lower() for value in values}) != len(values):
+        return None
+    return values
+
+
+def _public_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _public_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _public_model_confidentiality(
+    value: object,
+    *,
+    model_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return confidentiality metadata safe for /v1/models."""
+    if not isinstance(value, dict) or not value:
+        return None
+
+    public: dict[str, Any] = {}
+    for key in ("enabled", "verified"):
+        if key in value:
+            public[key] = value[key] is True
+
+    if "attestation_status" in value:
+        public_status = _public_string(value["attestation_status"])
+        expected_status = (
+            "verified" if public.get("verified") is True else "unavailable"
+        )
+        if public_status != expected_status:
+            return None
+        public["attestation_status"] = public_status
+
+    for key in (
+        "mode",
+        "provider_type",
+        "verifier",
+    ):
+        if key not in value:
+            continue
+        public_value = _public_string(value[key])
+        if public_value is None:
+            return None
+        public[key] = public_value
+
+    for key in (
+        "policy_digest",
+        "evidence_digest",
+        "verified_claims_digest",
+    ):
+        if key not in value or value[key] is None:
+            continue
+        if public.get("verified") is not True:
+            return None
+        if not is_full_sha256_digest(value[key]):
+            return None
+        public[key] = value[key]
+
+    for key in ("verified_at", "expires_at"):
+        if key not in value or value[key] is None:
+            continue
+        public_value = _public_int(value[key])
+        if public_value is None:
+            return None
+        public[key] = public_value
+
+    for key in PUBLIC_CONFIDENTIALITY_LIST_KEYS:
+        if key in value:
+            public_value = (
+                _strict_public_string_list(value[key])
+                if public.get("verified") is True
+                else _public_string_list(value[key])
+            )
+            if public_value is None:
+                return None
+            public[key] = public_value
+
+    verified_claims = value.get("_verified_claims")
+    if verified_claims is None:
+        verified_claims = value.get("verified_claims")
+    public_policy = _public_model_confidentiality_policy(
+        value.get("_confidentiality_policy", value.get("confidentiality_policy"))
+    )
+    if public.get("verified") is True:
+        if not public_provider_type_satisfies_mode(
+            public.get("provider_type"),
+            public.get("mode"),
+        ):
+            return None
+        if not public_verified_model_selectors_satisfy_provider(
+            public.get("provider_type"),
+            public.get("model_ids"),
+            public.get("model_id_prefixes"),
+        ):
+            return None
+        if isinstance(model_id, str) and model_id.strip():
+            public_model_ids = public.get("model_ids")
+            if not isinstance(public_model_ids, list):
+                return None
+            normalized_model_id = model_id.strip().lower()
+            if not any(
+                isinstance(public_model_id, str)
+                and public_model_id.strip().lower() == normalized_model_id
+                for public_model_id in public_model_ids
+            ):
+                return None
+        now = int(time.time())
+        if (
+            not isinstance(public.get("verified_at"), int)
+            or public["verified_at"] > now
+        ):
+            return None
+        if not isinstance(public.get("expires_at"), int) or public["expires_at"] <= now:
+            return None
+        if not isinstance(verified_claims, dict) or not verified_claims:
+            return None
+        try:
+            public["verified_claims_digest"] = _sha256_json_digest(verified_claims)
+        except (TypeError, ValueError):
+            return None
+        proof_claim_source = value.get("proof_claims")
+        reject_secret_source = isinstance(proof_claim_source, dict)
+        if not reject_secret_source:
+            proof_claim_source = verified_claims
+        proof_claims = verified_public_provider_proof_claims(
+            public.get("mode"),
+            proof_claim_source,
+            public_policy=public_policy,
+            reject_secret_source=reject_secret_source,
+        )
+        if proof_claims:
+            if proof_claims.get("payload_policy_digest") != public.get("policy_digest"):
+                return None
+            if proof_claims.get("payload_evidence_digest") != public.get(
+                "evidence_digest"
+            ):
+                return None
+            if not public_provider_proof_claims_cover_model_selectors(
+                public.get("provider_type"),
+                public.get("mode"),
+                proof_claims,
+                public.get("model_ids"),
+                public_policy=public_policy,
+            ):
+                return None
+            if not public_confidentiality_policy_binds_provider_proof(
+                public.get("provider_type"),
+                public.get("mode"),
+                public_policy,
+                proof_claims,
+                public.get("model_ids"),
+            ):
+                return None
+            public["proof_claims"] = proof_claims
+        else:
+            return None
+
+    if public.get("verified") is True and not (
+        public.get("mode")
+        and public.get("provider_type")
+        and public.get("verifier")
+        and public.get("policy_digest")
+        and public.get("evidence_digest")
+        and public.get("verified_claims_digest")
+        and isinstance(public.get("verified_at"), int)
+        and isinstance(public.get("expires_at"), int)
+    ):
+        return None
+    return public or None
 
 
 def _has_valid_pricing(model: dict) -> bool:
@@ -137,7 +502,9 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
                 if not _has_valid_pricing(model):
                     continue
 
-                filtered_models.append(model)
+                safe_model = remote_model_without_public_proof(model)
+                if safe_model is not None:
+                    filtered_models.append(safe_model)
 
             return filtered_models
     except Exception as e:
@@ -148,12 +515,32 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
 def _row_to_model(
     row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
 ) -> Model:
-    architecture = json.loads(row.architecture)
-    pricing = json.loads(row.pricing)
+    architecture = _loads_strict_json(row.architecture, "model architecture JSON")
+    pricing = _loads_strict_json(row.pricing, "model pricing JSON")
     per_request_limits = (
-        json.loads(row.per_request_limits) if row.per_request_limits else None
+        _loads_strict_json(row.per_request_limits, "model per_request_limits JSON")
+        if row.per_request_limits
+        else None
     )
-    top_provider_dict = json.loads(row.top_provider) if row.top_provider else None
+    top_provider_dict = (
+        _loads_strict_json(row.top_provider, "model top_provider JSON")
+        if row.top_provider
+        else None
+    )
+    capabilities = (
+        _loads_strict_json(row.capabilities_json, "model capabilities_json")
+        if getattr(row, "capabilities_json", None)
+        else {}
+    )
+    supported_endpoints = None
+    if isinstance(capabilities, dict) and isinstance(
+        capabilities.get("supported_endpoints"), list
+    ):
+        supported_endpoints = [
+            item
+            for item in capabilities["supported_endpoints"]
+            if isinstance(item, str)
+        ]
 
     if apply_provider_fee and isinstance(pricing, dict):
         pricing = {k: float(v) * provider_fee for k, v in pricing.items()}
@@ -178,8 +565,14 @@ def _row_to_model(
         enabled=row.enabled,
         upstream_provider_id=row.upstream_provider_id,
         canonical_slug=getattr(row, "canonical_slug", None),
-        alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
+        alias_ids=_loads_strict_json(row.alias_ids, "model alias_ids JSON")
+        if row.alias_ids
+        else None,
         forwarded_model_id=getattr(row, "forwarded_model_id", None) or row.id,
+        supported_endpoints=supported_endpoints,
+        last_seen_at=getattr(row, "last_seen_at", None),
+        availability_status=getattr(row, "availability_status", None),
+        capabilities_json=getattr(row, "capabilities_json", None),
     )
 
     if apply_provider_fee:
@@ -333,6 +726,11 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
             canonical_slug=model.canonical_slug,
             alias_ids=model.alias_ids,
             forwarded_model_id=model.forwarded_model_id,
+            supported_endpoints=model.supported_endpoints,
+            confidentiality=model.confidentiality,
+            last_seen_at=model.last_seen_at,
+            availability_status=model.availability_status,
+            capabilities_json=model.capabilities_json,
         )
     except Exception as e:
         logger.error(
@@ -363,7 +761,9 @@ async def _update_sats_pricing_once() -> None:
             for m in upstream.get_cached_models()
         ]
         upstream._models_cache = updated_models
-        upstream._models_by_id = {m.forwarded_model_id or m.id: m for m in updated_models}
+        upstream._models_by_id = {
+            m.forwarded_model_id or m.id: m for m in updated_models
+        }
         updated_count += len(updated_models)
 
     if updated_count > 0:
@@ -418,13 +818,37 @@ class ModelTestRequest(V2BaseModel):
     request_data: dict
 
 
-@models_router.post("/api/models/test")
+async def _require_model_test_admin(request: Request) -> None:
+    from ..core.admin import require_admin_api
+
+    await require_admin_api(request)
+
+
+@models_router.post("/api/models/test", response_model=None)
 async def test_model(
     payload: ModelTestRequest,
     session: AsyncSession = Depends(get_session),
-) -> dict:
+    _: None = Depends(_require_model_test_admin),
+) -> Any:
     """Test a model by sending a request through its configured upstream provider."""
     from sqlmodel import select
+
+    from ..proxy import confidential_routing_required
+
+    if confidential_routing_required():
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "confidential_route_required",
+                    "message": (
+                        "Direct upstream model testing is disabled when "
+                        "confidential routing is required"
+                    ),
+                }
+            },
+        )
 
     result = await session.execute(
         select(ModelRow).where(ModelRow.id == payload.model_id)
@@ -488,13 +912,70 @@ async def test_model(
 @models_router.get("/models/", include_in_schema=False)
 async def models(session: AsyncSession = Depends(get_session)) -> dict:
     """Get all available models from all providers with database overrides applied."""
-    from ..proxy import get_unique_models
+    from ..proxy import (
+        _safe_public_routstr_tee_status,
+        get_unique_models,
+        is_routable_confidential_model,
+    )
 
     items = get_unique_models()
     data = []
+    advertises_confidentiality = False
+    routstr_tee_status: dict[str, Any] | None = None
     for model in items:
         m = model.dict()
+        model_id = (
+            model.forwarded_model_id
+            if isinstance(model.forwarded_model_id, str)
+            and model.forwarded_model_id.strip()
+            else model.id
+        )
+        confidentiality = _public_model_confidentiality(
+            m.get("confidentiality"),
+            model_id=model_id,
+        )
+        if confidentiality:
+            advertises_confidentiality = True
+            if routstr_tee_status is None:
+                from ..core.attestation import get_public_routstr_tee_status
+
+                routstr_tee_status = _safe_public_routstr_tee_status(
+                    get_public_routstr_tee_status()
+                ) or {"required": True, "ready": False}
+            provider_verified = confidentiality.get("verified") is True
+            local_tee_ready = (
+                routstr_tee_status.get("ready") is True
+                if routstr_tee_status.get("required") is True
+                else True
+            )
+            routeable = (
+                isinstance(model_id, str)
+                and bool(model_id.strip())
+                and is_routable_confidential_model(model_id, model)
+            )
+            verified = provider_verified and local_tee_ready and routeable
+            m["confidentiality"] = confidentiality
+            m["confidential"] = verified
+            m["attestation_provider"] = confidentiality.get(
+                "provider_type"
+            ) or confidentiality.get("mode")
+            m["provider_attestation_status"] = (
+                "verified" if provider_verified else "unavailable"
+            )
+            m["attestation_status"] = "verified" if verified else "unavailable"
+            m["attestation_evidence_digest"] = confidentiality.get("evidence_digest")
+        else:
+            m.pop("confidentiality", None)
         if model.forwarded_model_id:
             m["id"] = model.forwarded_model_id
         data.append(m)
-    return {"data": data}
+    response: dict[str, Any] = {"data": data}
+    if advertises_confidentiality:
+        if routstr_tee_status is None:
+            from ..core.attestation import get_public_routstr_tee_status
+
+            routstr_tee_status = _safe_public_routstr_tee_status(
+                get_public_routstr_tee_status()
+            ) or {"required": True, "ready": False}
+        response["routstr_tee"] = routstr_tee_status
+    return response

@@ -1,8 +1,11 @@
 import asyncio
+import ipaddress
 import json
 import random
+import socket
 import string
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import websockets
@@ -18,6 +21,120 @@ providers_router = APIRouter(prefix="/v1/providers")
 # In-memory providers cache and lock
 _PROVIDERS_CACHE: list[dict[str, Any]] = []
 _PROVIDERS_CACHE_LOCK = asyncio.Lock()
+
+
+def _public_metadata_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _safe_provider_announcement_metadata(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+
+    public: dict[str, Any] = {}
+    name = _public_metadata_string(value.get("name"))
+    if name is not None:
+        public["name"] = name
+    about = _public_metadata_string(value.get("about"))
+    if about is not None:
+        public["about"] = about
+
+    confidentiality = value.get("confidentiality")
+    if isinstance(confidentiality, dict):
+        try:
+            from .listing import _build_confidentiality_listing_metadata
+
+            public_confidentiality = _build_confidentiality_listing_metadata(
+                confidentiality
+            )
+        except Exception:
+            public_confidentiality = None
+        if public_confidentiality is not None:
+            public["confidentiality"] = public_confidentiality
+    return public
+
+
+def _provider_endpoint_url_violation(endpoint_url: object) -> str | None:
+    if not isinstance(endpoint_url, str) or not endpoint_url.strip():
+        return "endpoint URL must be a non-empty string"
+
+    try:
+        parsed = urlparse(endpoint_url.strip())
+        port = parsed.port
+    except ValueError:
+        return "endpoint URL has invalid host or port"
+
+    if parsed.scheme not in {"http", "https"}:
+        return "endpoint URL must use http or https"
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        return "endpoint URL must not include credentials"
+    host = parsed.hostname
+    if not host:
+        return "endpoint URL must include a host"
+
+    normalized_host = host.strip().strip("[]").lower()
+    if normalized_host in {
+        "localhost",
+        "localhost.localdomain",
+    } or normalized_host.endswith(".localhost"):
+        return "endpoint URL must not target localhost"
+
+    try:
+        address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        return None
+
+    if not address.is_global:
+        return "endpoint URL must not target local, private, or reserved addresses"
+    if port is not None and not (1 <= port <= 65535):
+        return "endpoint URL has invalid port"
+    return None
+
+
+def _provider_endpoint_resolution_violation(endpoint_url: object) -> str | None:
+    static_violation = _provider_endpoint_url_violation(endpoint_url)
+    if static_violation is not None:
+        return static_violation
+
+    assert isinstance(endpoint_url, str)
+    parsed = urlparse(endpoint_url.strip())
+    host = (parsed.hostname or "").strip().strip("[]").lower()
+    if host.endswith(".onion"):
+        return None
+
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        pass
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        address_info = socket.getaddrinfo(
+            host,
+            port,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError:
+        return None
+
+    for info in address_info:
+        sockaddr = info[4]
+        if not sockaddr:
+            continue
+        try:
+            address = ipaddress.ip_address(str(sockaddr[0]))
+        except ValueError:
+            continue
+        if not address.is_global:
+            return (
+                "endpoint hostname must not resolve to local, private, "
+                "or reserved addresses"
+            )
+    return None
 
 
 def generate_subscription_id() -> str:
@@ -136,7 +253,13 @@ def parse_provider_announcement(event: dict[str, Any]) -> dict[str, Any] | None:
                     if tag[0] == "d":
                         d_tag = tag[1]
                     elif tag[0] == "u":
-                        endpoint_urls.append(tag[1])
+                        if _provider_endpoint_url_violation(tag[1]) is None:
+                            endpoint_urls.append(tag[1].strip())
+                        else:
+                            logger.warning(
+                                "Skipping provider announcement endpoint with "
+                                "unsafe URL"
+                            )
                     elif tag[0] == "mint":
                         mint_urls.append(tag[1])
                     elif tag[0] == "version":
@@ -144,9 +267,10 @@ def parse_provider_announcement(event: dict[str, Any]) -> dict[str, Any] | None:
 
             # Parse metadata from content for NIP-91
             content = event.get("content", "")
+            metadata: dict[str, Any] = {}
             if content:
                 try:
-                    metadata = json.loads(content)
+                    metadata = _safe_provider_announcement_metadata(json.loads(content))
                     provider_name = metadata.get("name", "Unknown Provider")
                     description = metadata.get("about")
                 except (json.JSONDecodeError, TypeError):
@@ -169,6 +293,13 @@ def parse_provider_announcement(event: dict[str, Any]) -> dict[str, Any] | None:
             )
             return None
 
+        if violation := _provider_endpoint_url_violation(endpoint_url):
+            logger.warning(
+                "Invalid provider announcement endpoint URL",
+                extra={"reason": violation},
+            )
+            return None
+
         return {
             "id": d_tag,
             "pubkey": event["pubkey"],
@@ -180,7 +311,7 @@ def parse_provider_announcement(event: dict[str, Any]) -> dict[str, Any] | None:
             "description": description,
             "mint_urls": mint_urls,
             "version": version,
-            "content": event.get("content", ""),
+            "metadata": metadata,
         }
 
     except Exception as e:
@@ -267,6 +398,17 @@ async def _discover_providers(pubkey: str | None = None) -> list[dict[str, Any]]
 async def refresh_providers_cache(pubkey: str | None = None) -> None:
     try:
         providers = await _discover_providers(pubkey=pubkey)
+        safe_providers: list[dict[str, Any]] = []
+        for provider in providers:
+            endpoint_url = provider.get("endpoint_url")
+            if violation := _provider_endpoint_resolution_violation(endpoint_url):
+                logger.warning(
+                    "Skipping provider announcement endpoint with unsafe resolved URL",
+                    extra={"reason": violation},
+                )
+                continue
+            safe_providers.append(provider)
+        providers = safe_providers
 
         health_tasks = [
             fetch_provider_health(provider["endpoint_url"]) for provider in providers
@@ -316,6 +458,13 @@ async def providers_cache_refresher(
 async def fetch_provider_health(endpoint_url: str) -> dict[str, Any]:
     """Fetch provider health and info, preferring /v1/info for models and pricing."""
     try:
+        if violation := _provider_endpoint_resolution_violation(endpoint_url):
+            return {
+                "status_code": 400,
+                "endpoint": "error",
+                "json": {"error": f"Unsafe provider endpoint: {violation}"},
+            }
+
         # Determine if we need Tor proxy based on .onion domain
         is_onion = ".onion" in endpoint_url
 

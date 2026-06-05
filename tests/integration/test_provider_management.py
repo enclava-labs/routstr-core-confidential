@@ -3,19 +3,158 @@ Integration tests for provider management functionality.
 Tests GET /v1/providers/ endpoint for listing and managing providers.
 """
 
+import hashlib
+import json
 import time
 from types import TracebackType
 from typing import Any, Generator
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
+from sqlmodel import select
 
 from routstr.core.admin import admin_sessions
-from routstr.core.db import UpstreamProviderRow
+from routstr.core.db import ModelRow, UpstreamProviderRow
 from routstr.nostr.discovery import _PROVIDERS_CACHE
 
 from .utils import ResponseValidator
+
+
+def _digest(label: str) -> str:
+    return "sha256:" + hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+VALID_POLICY_DIGEST = _digest("valid-policy")
+VALID_EVIDENCE_DIGEST = _digest("valid-evidence")
+VALID_ROUTSTR_PUBLIC_KEY_DIGEST = _digest("valid-routstr-public-key")
+VALID_ROUTSTR_TEE_CLAIMS_DIGEST = _digest("valid-routstr-tee-claims")
+VALID_ROUTSTR_TEE_EVIDENCE_DIGEST = _digest("valid-routstr-tee-evidence")
+VALID_ROUTSTR_HPKE_KEY_CONFIG_DIGEST = _digest("valid-routstr-hpke-key-config")
+VALID_ROUTSTR_HPKE_PUBLIC_KEY_DIGEST = _digest("valid-routstr-hpke-public-key")
+
+
+def _tinfoil_public_proof_claims() -> dict[str, object]:
+    return {
+        "transport": "ehbp",
+        "repo": "tinfoilsh/confidential-model-router",
+        "attestation_format": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+        "attestation_report_digest": _digest("placeholder-3"),
+        "attested_hpke_public_key_hex": "b" * 64,
+        "code_measurement_fingerprint": _digest("placeholder-2"),
+        "enclave_measurement_fingerprint": _digest("placeholder-1"),
+        "payload_policy_digest": VALID_POLICY_DIGEST,
+        "payload_evidence_digest": VALID_EVIDENCE_DIGEST,
+        "release_digest": _digest("placeholder-4"),
+        "tls_public_key_fingerprint_sha256": _digest("placeholder-5"),
+        "verification_steps": {
+            "attested_transport_key_binding": True,
+            "code_transparency": True,
+            "freshness": True,
+            "hardware_attestation_report": True,
+            "hardware_certificate_chain": True,
+            "measurement_match": True,
+        },
+        "model_attestations": {
+            "gpt-secure": {
+                "repo": "tinfoilsh/confidential-gpt-secure",
+                "attestation_format": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+                "attestation_report_digest": _digest("placeholder-6"),
+                "attested_hpke_public_key_hex": "c" * 64,
+                "code_measurement_fingerprint": _digest("placeholder-7"),
+                "enclave_measurement_fingerprint": _digest("placeholder-8"),
+                "release_digest": _digest("placeholder-9"),
+                "tls_public_key_fingerprint_sha256": _digest("placeholder-a"),
+                "verification_steps": {
+                    "attested_transport_key_binding": True,
+                    "code_transparency": True,
+                    "freshness": True,
+                    "hardware_attestation_report": True,
+                    "hardware_certificate_chain": True,
+                    "measurement_match": True,
+                },
+            }
+        },
+    }
+
+
+def _routstr_tee_status(*, ready: bool = True) -> dict[str, object]:
+    return {
+        "required": True,
+        "ready": ready,
+        "attestation_evidence_digest": VALID_ROUTSTR_TEE_EVIDENCE_DIGEST,
+        "hpke_key_config_digest": VALID_ROUTSTR_HPKE_KEY_CONFIG_DIGEST,
+        "hpke_public_key_digest": VALID_ROUTSTR_HPKE_PUBLIC_KEY_DIGEST,
+        "client_confidentiality": {
+            "mode": "attested-tls-termination",
+            "tls_terminates_in_attested_tee": True,
+            "inbound_ehbp_ohttp_request_decryption": False,
+            "attested_tls_public_key_digest": VALID_ROUTSTR_PUBLIC_KEY_DIGEST,
+        },
+        "local_verification": {
+            "verified": ready,
+            "verified_at": 1_700_000_000,
+            "expires_at": 4_102_444_800,
+            "evidence_digest": VALID_ROUTSTR_TEE_EVIDENCE_DIGEST,
+            "verified_claims_digest": VALID_ROUTSTR_TEE_CLAIMS_DIGEST,
+            "proof_claims": {
+                "hpke_key_config_digest": VALID_ROUTSTR_HPKE_KEY_CONFIG_DIGEST,
+                "hpke_public_key_digest": VALID_ROUTSTR_HPKE_PUBLIC_KEY_DIGEST,
+                "public_key_digest": VALID_ROUTSTR_PUBLIC_KEY_DIGEST,
+            },
+        },
+    }
+
+
+def _confidential_provider_listing_metadata(
+    *,
+    routstr_tee_ready: bool = True,
+) -> dict[str, object]:
+    return {
+        "name": "Attested Provider",
+        "about": "Publishes a confidential Routstr listing",
+        "confidentiality": {
+            "mode": "required",
+            "required": True,
+            "routstr_tee": _routstr_tee_status(ready=routstr_tee_ready),
+            "routable_with_full_attestation": {
+                "tinfoil": ["gpt-secure"],
+                "ppq-private": [],
+                "privatemode": [],
+            },
+            "providers": [
+                {
+                    "provider_type": "tinfoil",
+                    "confidentiality_policy": {
+                        "repo": "tinfoilsh/confidential-model-router",
+                        "expected_release_digest": _digest("placeholder-4"),
+                        "require_model_attestations": True,
+                        "model_attestation_targets": {
+                            "gpt-secure": {
+                                "host": "gpt-secure.tinfoil.example",
+                                "repo": "tinfoilsh/confidential-gpt-secure",
+                                "expected_release_digest": _digest("placeholder-9"),
+                            }
+                        },
+                    },
+                    "confidentiality": {
+                        "enabled": True,
+                        "verified": True,
+                        "mode": "tinfoil",
+                        "verifier": "unit-test-verifier",
+                        "policy_digest": VALID_POLICY_DIGEST,
+                        "evidence_digest": VALID_EVIDENCE_DIGEST,
+                        "verified_at": 1_700_000_000,
+                        "expires_at": 1_800_000_000,
+                        "model_ids": ["gpt-secure"],
+                        "model_id_prefixes": [],
+                        "proof_claims": _tinfoil_public_proof_claims(),
+                    },
+                }
+            ],
+        },
+        "raw_verifier_claims": {"api_key": "SECRET_ANNOUNCEMENT_CONTENT"},
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -245,6 +384,98 @@ async def test_providers_data_structure_validation(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_providers_endpoint_exposes_sanitized_confidentiality_listing_metadata(
+    integration_client: AsyncClient,
+) -> None:
+    mock_events: list[dict[str, Any]] = [
+        {
+            "id": "attested-event",
+            "pubkey": "attested_pubkey",
+            "kind": 38421,
+            "created_at": 1234567890,
+            "content": json.dumps(_confidential_provider_listing_metadata()),
+            "tags": [
+                ["d", "attested-provider"],
+                ["u", "http://attested-provider.onion"],
+            ],
+        }
+    ]
+
+    with patch(
+        "routstr.nostr.discovery.query_nostr_relay_for_providers",
+        return_value=mock_events,
+    ):
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
+            mock_fetch.return_value = {
+                "status_code": 200,
+                "endpoint": "root",
+                "json": {"status": "online"},
+            }
+            response = await integration_client.get("/v1/providers/")
+
+    assert response.status_code == 200
+    provider = response.json()["providers"][0]
+
+    assert "content" not in provider
+    assert "SECRET_ANNOUNCEMENT_CONTENT" not in json.dumps(provider)
+    assert provider["metadata"]["confidentiality"][
+        "routable_with_full_attestation"
+    ] == {
+        "tinfoil": ["gpt-secure"],
+        "ppq-private": [],
+        "privatemode": [],
+    }
+    assert provider["metadata"]["confidentiality"]["end_to_end_ready"] is True
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_providers_endpoint_clears_copied_confidentiality_routes_without_tee(
+    integration_client: AsyncClient,
+) -> None:
+    mock_events: list[dict[str, Any]] = [
+        {
+            "id": "copied-attested-event",
+            "pubkey": "attested_pubkey",
+            "kind": 38421,
+            "created_at": 1234567890,
+            "content": json.dumps(
+                _confidential_provider_listing_metadata(routstr_tee_ready=False)
+            ),
+            "tags": [
+                ["d", "copied-attested-provider"],
+                ["u", "http://copied-attested-provider.onion"],
+            ],
+        }
+    ]
+
+    with patch(
+        "routstr.nostr.discovery.query_nostr_relay_for_providers",
+        return_value=mock_events,
+    ):
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
+            mock_fetch.return_value = {
+                "status_code": 200,
+                "endpoint": "root",
+                "json": {"status": "online"},
+            }
+            response = await integration_client.get("/v1/providers/")
+
+    assert response.status_code == 200
+    provider = response.json()["providers"][0]
+
+    assert provider["metadata"]["confidentiality"][
+        "routable_with_full_attestation"
+    ] == {
+        "tinfoil": [],
+        "ppq-private": [],
+        "privatemode": [],
+    }
+    assert provider["metadata"]["confidentiality"]["end_to_end_ready"] is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_providers_endpoint_no_providers_found(
     integration_client: AsyncClient,
 ) -> None:
@@ -275,6 +506,174 @@ async def test_providers_endpoint_no_providers_found(
         assert "providers" in data
         assert isinstance(data["providers"], list)
         assert len(data["providers"]) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_providers_endpoint_rejects_private_discovery_endpoints(
+    integration_client: AsyncClient,
+) -> None:
+    """Untrusted Nostr announcements must not trigger local/private SSRF probes."""
+    mock_events: list[dict[str, Any]] = [
+        {
+            "id": "loopback-event",
+            "pubkey": "attacker_pubkey",
+            "kind": 38421,
+            "created_at": 1234567890,
+            "content": '{"name": "Loopback"}',
+            "tags": [["d", "loopback"], ["u", "http://127.0.0.1:8080"]],
+        },
+        {
+            "id": "metadata-event",
+            "pubkey": "attacker_pubkey",
+            "kind": 38421,
+            "created_at": 1234567891,
+            "content": '{"name": "Metadata"}',
+            "tags": [["d", "metadata"], ["u", "http://169.254.169.254/latest"]],
+        },
+        {
+            "id": "credential-event",
+            "pubkey": "attacker_pubkey",
+            "kind": 38421,
+            "created_at": 1234567892,
+            "content": '{"name": "Credential URL"}',
+            "tags": [
+                [
+                    "d",
+                    "credential-url",
+                ],
+                [
+                    "u",
+                    "https://user:password@example.com",
+                ],
+            ],
+        },
+        {
+            "id": "valid-event",
+            "pubkey": "provider_pubkey",
+            "kind": 38421,
+            "created_at": 1234567893,
+            "content": '{"name": "Valid"}',
+            "tags": [["d", "valid"], ["u", "http://provider.onion"]],
+        },
+    ]
+
+    with patch(
+        "routstr.nostr.discovery.query_nostr_relay_for_providers",
+        return_value=mock_events,
+    ):
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
+            mock_fetch.return_value = {
+                "status_code": 200,
+                "endpoint": "root",
+                "json": {"status": "online"},
+            }
+            response = await integration_client.get("/v1/providers/?include_json=true")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [item["provider"]["endpoint_url"] for item in data["providers"]] == [
+        "http://provider.onion"
+    ]
+    mock_fetch.assert_awaited_once_with("http://provider.onion")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_provider_health_rejects_hostname_resolving_to_private_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DNS names resolving to local/private IPs must not reach the HTTP client."""
+    import socket
+
+    from routstr.nostr.discovery import fetch_provider_health
+
+    def fake_getaddrinfo(
+        host: str,
+        port: int | None,
+        *args: object,
+        **kwargs: object,
+    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        assert host == "attacker.example"
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("127.0.0.1", port or 80),
+            )
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    with patch("routstr.nostr.discovery.httpx.AsyncClient") as client_cls:
+        health = await fetch_provider_health("http://attacker.example/v1")
+
+    assert health["status_code"] == 400
+    assert health["endpoint"] == "error"
+    assert "Unsafe provider endpoint" in health["json"]["error"]
+    client_cls.assert_not_called()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_providers_endpoint_omits_hostname_resolving_to_private_ip(
+    integration_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider discovery must not publish hostnames that resolve to private IPs."""
+    import socket
+
+    mock_events: list[dict[str, Any]] = [
+        {
+            "id": "private-dns-event",
+            "pubkey": "attacker_pubkey",
+            "kind": 38421,
+            "created_at": 1234567890,
+            "content": '{"name": "Private DNS"}',
+            "tags": [["d", "private-dns"], ["u", "http://attacker.example/v1"]],
+        },
+        {
+            "id": "valid-event",
+            "pubkey": "provider_pubkey",
+            "kind": 38421,
+            "created_at": 1234567891,
+            "content": '{"name": "Valid"}',
+            "tags": [["d", "valid"], ["u", "http://provider.onion"]],
+        },
+    ]
+
+    def fake_getaddrinfo(
+        host: str,
+        port: int | None,
+        *args: object,
+        **kwargs: object,
+    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        assert host == "attacker.example"
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("127.0.0.1", port or 80),
+            )
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    with patch(
+        "routstr.nostr.discovery.query_nostr_relay_for_providers",
+        return_value=mock_events,
+    ):
+        response = await integration_client.get("/v1/providers/")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [provider["endpoint_url"] for provider in data["providers"]] == [
+        "http://provider.onion"
+    ]
 
 
 @pytest.mark.integration
@@ -682,6 +1081,1577 @@ async def test_no_database_changes_during_provider_operations(
     assert final_diff["api_keys"]["added"] == []
     assert final_diff["api_keys"]["modified"] == []
     assert final_diff["api_keys"]["removed"] == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_provider_types_include_confidential_integrations(
+    integration_client: AsyncClient,
+) -> None:
+    admin_token = "test-admin-token-provider-types"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        response = await integration_client.get("/admin/api/provider-types")
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 200
+    provider_types = {item["id"]: item for item in response.json()}
+
+    assert provider_types["tinfoil"]["default_base_url"] == (
+        "https://inference.tinfoil.sh/v1"
+    )
+    assert provider_types["tinfoil"]["fixed_base_url"] is True
+    assert provider_types["ppq-private"]["default_base_url"] == (
+        "https://api.ppq.ai/private/v1"
+    )
+    assert provider_types["ppq-private"]["can_create_account"] is False
+    assert provider_types["privatemode"]["default_base_url"] == (
+        "http://127.0.0.1:8080/v1"
+    )
+    assert provider_types["privatemode"]["fixed_base_url"] is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_unknown_upstream_provider_type(
+    integration_client: AsyncClient,
+) -> None:
+    admin_token = "test-admin-token-unknown-provider-type"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        response = await integration_client.post(
+            "/admin/api/upstream-providers",
+            json={
+                "provider_type": "confidential-looking-but-unregistered",
+                "base_url": "https://example.com/v1",
+                "api_key": "sk-test",
+                "provider_fee": 1.0,
+            },
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Provider type is not registered"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_fixed_base_url_provider_redirect(
+    integration_client: AsyncClient,
+) -> None:
+    admin_token = "test-admin-token-fixed-base-url"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        response = await integration_client.post(
+            "/admin/api/upstream-providers",
+            json={
+                "provider_type": "tinfoil",
+                "base_url": "https://attacker.example/v1",
+                "api_key": "sk-test",
+                "provider_fee": 1.0,
+            },
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Provider type tinfoil requires base_url https://inference.tinfoil.sh/v1"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_update_rejects_fixed_base_url_provider_redirect(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    provider = UpstreamProviderRow(
+        provider_type="generic",
+        base_url="https://example.com/v1",
+        api_key="sk-test",
+        enabled=True,
+        provider_fee=1.0,
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    admin_token = "test-admin-token-update-fixed-base-url"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        response = await integration_client.patch(
+            f"/admin/api/upstream-providers/{provider.id}",
+            json={
+                "provider_type": "tinfoil",
+                "base_url": "https://attacker.example/v1",
+            },
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Provider type tinfoil requires base_url https://inference.tinfoil.sh/v1"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_remote_privatemode_proxy_base_url(
+    integration_client: AsyncClient,
+) -> None:
+    admin_token = "test-admin-token-remote-privatemode"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        response = await integration_client.post(
+            "/admin/api/upstream-providers",
+            json={
+                "provider_type": "privatemode",
+                "base_url": "https://api.privatemode.ai/v1",
+                "api_key": "sk-test",
+                "provider_fee": 1.0,
+            },
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Privatemode proxy base_url must use a loopback host"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_update_rejects_remote_privatemode_proxy_base_url(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    provider = UpstreamProviderRow(
+        provider_type="privatemode",
+        base_url="http://127.0.0.1:8080/v1",
+        api_key="sk-test",
+        enabled=True,
+        provider_fee=1.0,
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    admin_token = "test-admin-token-update-remote-privatemode"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        response = await integration_client.patch(
+            f"/admin/api/upstream-providers/{provider.id}",
+            json={"base_url": "https://api.privatemode.ai/v1"},
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Privatemode proxy base_url must use a loopback host"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_non_private_ppq_private_base_url(
+    integration_client: AsyncClient,
+) -> None:
+    admin_token = "test-admin-token-ppq-private-base-url"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        response = await integration_client.post(
+            "/admin/api/upstream-providers",
+            json={
+                "provider_type": "ppq-private",
+                "base_url": "https://api.ppq.ai/v1",
+                "api_key": "sk-test",
+                "provider_fee": 1.0,
+            },
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "PPQ private base_url must include a private path segment"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_unowned_ppq_private_base_url(
+    integration_client: AsyncClient,
+) -> None:
+    admin_token = "test-admin-token-ppq-private-unowned-base-url"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        response = await integration_client.post(
+            "/admin/api/upstream-providers",
+            json={
+                "provider_type": "ppq-private",
+                "base_url": "https://attacker.example/private/v1",
+                "api_key": "sk-test",
+                "provider_fee": 1.0,
+            },
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "PPQ private base_url host must be ppq.ai or a ppq.ai subdomain"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_update_rejects_non_private_ppq_private_base_url(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    provider = UpstreamProviderRow(
+        provider_type="ppq-private",
+        base_url="https://api.ppq.ai/private/v1",
+        api_key="sk-test",
+        enabled=True,
+        provider_fee=1.0,
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    admin_token = "test-admin-token-update-ppq-private-base-url"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        response = await integration_client.patch(
+            f"/admin/api/upstream-providers/{provider.id}",
+            json={"base_url": "https://api.ppq.ai/v1"},
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "PPQ private base_url must include a private path segment"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_ppq_private_catalog_origin_mismatch(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-ppq-private-catalog-origin"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "ppq-private",
+                    "base_url": "https://api.ppq.ai/private/v1",
+                    "api_key": "sk-test",
+                    "provider_fee": 1.0,
+                    "provider_settings": {
+                        "catalog_base_url": "https://catalog.attacker.example/v1"
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "PPQ private catalog_base_url origin must match provider base_url origin"
+        )
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.provider_type == "ppq-private"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_update_rejects_ppq_private_catalog_origin_mismatch(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    provider = UpstreamProviderRow(
+        provider_type="ppq-private",
+        base_url="https://api.ppq.ai/private/v1",
+        api_key="sk-test",
+        enabled=True,
+        provider_fee=1.0,
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    admin_token = "test-admin-token-update-ppq-private-catalog-origin"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.patch(
+                f"/admin/api/upstream-providers/{provider.id}",
+                json={
+                    "provider_settings": {
+                        "catalog_base_url": "https://catalog.attacker.example/v1"
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "PPQ private catalog_base_url origin must match provider base_url origin"
+        )
+
+        await integration_session.refresh(provider)
+        assert provider.provider_settings is None
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_update_rejects_ppq_private_base_url_that_breaks_stored_catalog(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    provider = UpstreamProviderRow(
+        provider_type="ppq-private",
+        base_url="https://api.ppq.ai/private/v1",
+        api_key="sk-test",
+        enabled=True,
+        provider_fee=1.0,
+        provider_settings='{"catalog_base_url":"https://api.ppq.ai/v1"}',
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    admin_token = "test-admin-token-update-ppq-private-stored-catalog"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.patch(
+                f"/admin/api/upstream-providers/{provider.id}",
+                json={"base_url": "https://tenant.ppq.ai/private/v1"},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "PPQ private catalog_base_url origin must match provider base_url origin"
+        )
+
+        await integration_session.refresh(provider)
+        assert provider.base_url == "https://api.ppq.ai/private/v1"
+        assert (
+            provider.provider_settings == '{"catalog_base_url":"https://api.ppq.ai/v1"}'
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_update_ignores_malformed_stored_provider_settings(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    provider = UpstreamProviderRow(
+        provider_type="ppq-private",
+        base_url="https://api.ppq.ai/private/v1",
+        api_key="sk-test",
+        enabled=True,
+        provider_fee=1.0,
+        provider_settings='{"catalog_base_url":"https://api.ppq.ai/v1"',
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    admin_token = "test-admin-token-update-malformed-provider-settings"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.patch(
+                f"/admin/api/upstream-providers/{provider.id}",
+                json={"enabled": False},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False
+
+        await integration_session.refresh(provider)
+        assert provider.enabled is False
+        assert (
+            provider.provider_settings == '{"catalog_base_url":"https://api.ppq.ai/v1"'
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_update_ignores_non_standard_stored_provider_settings(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    provider = UpstreamProviderRow(
+        provider_type="ppq-private",
+        base_url="https://api.ppq.ai/private/v1",
+        api_key="sk-test",
+        enabled=True,
+        provider_fee=1.0,
+        provider_settings='{"catalog_base_url":"https://api.ppq.ai/v1","ttl":NaN}',
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    admin_token = "test-admin-token-update-non-standard-provider-settings"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.patch(
+                f"/admin/api/upstream-providers/{provider.id}",
+                json={"enabled": False},
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["enabled"] is False
+        assert body["provider_settings"] is None
+
+        await integration_session.refresh(provider)
+        assert provider.enabled is False
+        assert provider.provider_settings == (
+            '{"catalog_base_url":"https://api.ppq.ai/v1","ttl":NaN}'
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_list_ignores_malformed_stored_provider_settings(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    provider = UpstreamProviderRow(
+        provider_type="ppq-private",
+        base_url="https://api.ppq.ai/private/v1",
+        api_key="sk-test",
+        enabled=True,
+        provider_fee=1.0,
+        provider_settings='{"catalog_base_url":"https://api.ppq.ai/v1"',
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    admin_token = "test-admin-token-list-malformed-provider-settings"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        response = await integration_client.get("/admin/api/upstream-providers")
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 200
+    rows = response.json()
+    matching = [row for row in rows if row["id"] == provider.id]
+    assert len(matching) == 1
+    assert matching[0]["provider_settings"] is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_detail_ignores_malformed_stored_provider_settings(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    provider = UpstreamProviderRow(
+        provider_type="ppq-private",
+        base_url="https://api.ppq.ai/private/v1",
+        api_key="sk-test",
+        enabled=True,
+        provider_fee=1.0,
+        provider_settings='{"catalog_base_url":"https://api.ppq.ai/v1"',
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    admin_token = "test-admin-token-detail-malformed-provider-settings"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        response = await integration_client.get(
+            f"/admin/api/upstream-providers/{provider.id}"
+        )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 200
+    assert response.json()["provider_settings"] is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_non_finite_provider_fee(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-provider-fee"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                content=(
+                    '{"provider_type":"tinfoil",'
+                    '"base_url":"https://inference.tinfoil.sh/v1",'
+                    '"api_key":"sk-test",'
+                    '"provider_fee":NaN}'
+                ),
+                headers={"Content-Type": "application/json"},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "provider_fee must be a finite number"
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == "https://inference.tinfoil.sh/v1"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_non_positive_provider_fee(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-provider-negative-fee"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "tinfoil",
+                    "base_url": "https://inference.tinfoil.sh/v1",
+                    "api_key": "sk-test",
+                    "provider_fee": -1.0,
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "provider_fee must be positive"
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == "https://inference.tinfoil.sh/v1"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_non_standard_model_override_json(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-model-override"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    provider = UpstreamProviderRow(
+        provider_type="tinfoil",
+        base_url="https://inference.tinfoil.sh/v1",
+        api_key="sk-upstream-test",
+        enabled=True,
+        provider_fee=1.01,
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    try:
+        with patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock):
+            response = await integration_client.post(
+                f"/admin/api/upstream-providers/{provider.id}/models",
+                content=(
+                    '{"id":"gpt-secure","name":"GPT Secure","description":"test",'
+                    '"created":1,"context_length":4096,'
+                    '"architecture":{"modality":"text->text",'
+                    '"input_modalities":["text"],"output_modalities":["text"],'
+                    '"tokenizer":"gpt","instruct_type":null},'
+                    '"pricing":{"prompt":NaN,"completion":0.0,"request":0.0,'
+                    '"image":0.0,"web_search":0.0,"internal_reasoning":0.0}}'
+                ),
+                headers={"Content-Type": "application/json"},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "model pricing must be strict standard JSON"
+        )
+
+        rows = (
+            await integration_session.exec(
+                select(ModelRow).where(ModelRow.id == "gpt-secure")
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_string_non_finite_model_override_pricing(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-model-override-string-nan"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    provider = UpstreamProviderRow(
+        provider_type="tinfoil",
+        base_url="https://inference.tinfoil.sh/v1",
+        api_key="sk-upstream-test",
+        enabled=True,
+        provider_fee=1.01,
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    try:
+        with patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock):
+            response = await integration_client.post(
+                f"/admin/api/upstream-providers/{provider.id}/models",
+                json={
+                    "id": "gpt-secure",
+                    "name": "GPT Secure",
+                    "description": "test",
+                    "created": 1,
+                    "context_length": 4096,
+                    "architecture": {
+                        "modality": "text->text",
+                        "input_modalities": ["text"],
+                        "output_modalities": ["text"],
+                        "tokenizer": "gpt",
+                        "instruct_type": None,
+                    },
+                    "pricing": {
+                        "prompt": "NaN",
+                        "completion": 0.0,
+                        "request": 0.0,
+                        "image": 0.0,
+                        "web_search": 0.0,
+                        "internal_reasoning": 0.0,
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "model pricing values must be finite"
+
+        rows = (
+            await integration_session.exec(
+                select(ModelRow).where(ModelRow.id == "gpt-secure")
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_non_standard_provider_settings_json(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-provider-settings"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                content=(
+                    '{"provider_type":"tinfoil",'
+                    '"base_url":"https://inference.tinfoil.sh/v1",'
+                    '"api_key":"sk-test",'
+                    '"provider_settings":{'
+                    '"confidentiality":{"policy":{"max_verifier_age_seconds":NaN}}'
+                    "}}"
+                ),
+                headers={"Content-Type": "application/json"},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "provider_settings must be strict standard JSON"
+        )
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == "https://inference.tinfoil.sh/v1"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_inline_secret_confidential_provider_settings_on_create(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-provider-settings-secret"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+    base_url = "https://secret-policy-create.tinfoil.example/v1"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "tinfoil",
+                    "base_url": base_url,
+                    "api_key": "sk-test",
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "tinfoil",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                            "policy": {
+                                "repo": "tinfoilsh/confidential-gpt-secure",
+                                "headers": {
+                                    "Authorization": "Bearer sk-secret-provider-token"
+                                },
+                            },
+                        }
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert "authorization must not be embedded" in response.json()["detail"]
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == base_url
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_secret_anywhere_in_provider_settings_on_create(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-provider-settings-top-secret"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+    base_url = "https://secret-provider-settings.tinfoil.example/v1"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "tinfoil",
+                    "base_url": base_url,
+                    "api_key": "sk-test",
+                    "provider_settings": {
+                        "headers": {"Authorization": "Bearer sk-secret-provider-token"},
+                        "confidentiality": {
+                            "mode": "tinfoil",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                            "policy": {
+                                "repo": "tinfoilsh/confidential-gpt-secure",
+                            },
+                        },
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert "authorization must not be embedded" in response.json()["detail"]
+        assert "sk-secret-provider-token" not in response.text
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == base_url
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_placeholder_confidential_policy_pin_on_create(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-placeholder-policy-pin"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+    base_url = "https://inference.tinfoil.sh/v1"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "tinfoil",
+                    "base_url": base_url,
+                    "api_key": "sk-test-placeholder-pin",
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "tinfoil",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                            "policy": {
+                                "repo": "tinfoilsh/confidential-model-router",
+                                "expected_release_digest": "sha256:" + ("a" * 64),
+                            },
+                        }
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert "placeholder digest" in response.json()["detail"]
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.api_key == "sk-test-placeholder-pin"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_placeholder_confidential_policy_pin_on_update(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-placeholder-policy-pin-update"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    provider = UpstreamProviderRow(
+        provider_type="tinfoil",
+        base_url="https://inference.tinfoil.sh/v1",
+        api_key="sk-upstream-placeholder-update",
+        enabled=True,
+        provider_fee=1.01,
+        provider_settings=(
+            '{"confidentiality":{"mode":"tinfoil",'
+            '"model_ids":["tinfoil/gpt-secure"],'
+            '"policy":{"repo":"tinfoilsh/confidential-model-router"}}}'
+        ),
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+    original_provider_settings = provider.provider_settings
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.patch(
+                f"/admin/api/upstream-providers/{provider.id}",
+                json={
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "tinfoil",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                            "policy": {
+                                "repo": "tinfoilsh/confidential-model-router",
+                                "expected_release_digest": "sha256:" + ("b" * 64),
+                            },
+                        }
+                    }
+                },
+            )
+
+        assert response.status_code == 400
+        assert "placeholder digest" in response.json()["detail"]
+
+        await integration_session.refresh(provider)
+        assert provider.provider_settings == original_provider_settings
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_placeholder_top_level_attestation_policy_pin(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-placeholder-attestation-policy"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+    base_url = "https://inference.tinfoil.sh/v1"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "tinfoil",
+                    "base_url": base_url,
+                    "api_key": "sk-test-placeholder-alias",
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "tinfoil",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                        },
+                        "attestation_policy": {
+                            "repo": "tinfoilsh/confidential-model-router",
+                            "allowed_release_digests": ["sha256:" + ("c" * 64)],
+                        },
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert "placeholder digest" in response.json()["detail"]
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.api_key == "sk-test-placeholder-alias"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_confidentiality_mode_provider_type_mismatch(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-confidential-mode-mismatch"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "ppq-private",
+                    "base_url": "https://api.ppq.ai/private/v1",
+                    "api_key": "sk-test-confidential-mode-mismatch",
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "tinfoil",
+                            "model_ids": ["private/gpt-oss-120b"],
+                            "policy": {
+                                "repo": "ppq-ai/private-tee",
+                                "expected_release_digest": (
+                                    "sha256:ebb921d8572bc8f6b4e04812a7e65bffcf6ac1a2fabe8a55115a13d61e901b85"
+                                ),
+                            },
+                        }
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "confidentiality mode tinfoil does not match provider_type ppq-private"
+        )
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.api_key == "sk-test-confidential-mode-mismatch"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_unknown_confidentiality_mode(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-unknown-confidential-mode"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "tinfoil",
+                    "base_url": "https://inference.tinfoil.sh/v1",
+                    "api_key": "sk-test-unknown-confidential-mode",
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "custom-confidential-mode",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                            "policy": {
+                                "repo": "tinfoilsh/confidential-model-router",
+                                "expected_release_digest": (
+                                    "sha256:ebb921d8572bc8f6b4e04812a7e65bffcf6ac1a2fabe8a55115a13d61e901b85"
+                                ),
+                            },
+                        }
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "confidentiality mode must be tinfoil, ppq-private-tee, or privatemode"
+        )
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.api_key == "sk-test-unknown-confidential-mode"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_tinfoil_selected_model_policy_without_model_attestations(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-tinfoil-missing-model-attestations"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "tinfoil",
+                    "base_url": "https://inference.tinfoil.sh/v1",
+                    "api_key": "sk-test-tinfoil-missing-model-attestations",
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "tinfoil",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                            "policy": {
+                                "repo": "tinfoilsh/confidential-model-router",
+                                "expected_release_digest": (
+                                    "sha256:ebb921d8572bc8f6b4e04812a7e65bffcf6ac1a2fabe8a55115a13d61e901b85"
+                                ),
+                                "expected_code_measurement_fingerprint": (
+                                    "sha256:f9bdc70e21e119a7446f5d62f1304234a151919b5c5cd4a1b9d511b3a9525a73"
+                                ),
+                            },
+                        }
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert (
+            "Tinfoil require_model_attestations must be true for selected model routing"
+            in response.json()["detail"]
+        )
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.api_key
+                    == "sk-test-tinfoil-missing-model-attestations"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_ppq_private_non_private_selected_model(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-ppq-private-non-private-model"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "ppq-private",
+                    "base_url": "https://api.ppq.ai/private/v1",
+                    "api_key": "sk-test-ppq-private-non-private-model",
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "ppq-private-tee",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                            "policy": {
+                                "attestation_bundle_url": (
+                                    "https://api.ppq.ai/private/v1/attestation-bundle"
+                                ),
+                                "repo": "ppq-ai/private-tee",
+                                "expected_release_digest": (
+                                    "sha256:ebb921d8572bc8f6b4e04812a7e65bffcf6ac1a2fabe8a55115a13d61e901b85"
+                                ),
+                                "expected_code_measurement_fingerprint": (
+                                    "sha256:f9bdc70e21e119a7446f5d62f1304234a151919b5c5cd4a1b9d511b3a9525a73"
+                                ),
+                                "proxy_binary_digest": (
+                                    "sha256:6bd4e7d891d73c4f24db0cd79d8e82cbcb0714b56eddf9a5207845440d8fe4ab"
+                                ),
+                                "proxy_binary_path": "/opt/ppq/ppq-private-mode-proxy",
+                                "require_model_attestations": True,
+                                "model_attestation_targets": {
+                                    "tinfoil/gpt-secure": {
+                                        "host": "gpt-secure.tinfoil.example",
+                                        "repo": "tinfoilsh/confidential-gpt-secure",
+                                        "expected_release_digest": (
+                                            "sha256:2f1edb5242e12ac12be60356f28ccf9d1b5fadc2e5fbb6a4a672bd556b327d76"
+                                        ),
+                                        "expected_code_measurement_fingerprint": (
+                                            "sha256:47ab8df4d5c88cf9482f077481453e114e1a3192c115000106f168b6842aa8b3"
+                                        ),
+                                    }
+                                },
+                            },
+                        }
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert (
+            "PPQ private model_ids must start with private/"
+            in (response.json()["detail"])
+        )
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.api_key
+                    == "sk-test-ppq-private-non-private-model"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_runtime_unloadable_confidential_policy_shape(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-runtime-unloadable-confidential-policy"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "tinfoil",
+                    "base_url": "https://inference.tinfoil.sh/v1",
+                    "api_key": "sk-test-runtime-unloadable-confidential-policy",
+                    "provider_settings": {
+                        "mode": "tinfoil",
+                        "model_ids": ["tinfoil/gpt-secure"],
+                        "policy": {
+                            "repo": "tinfoilsh/confidential-model-router",
+                            "expected_release_digest": "sha256:" + ("a" * 64),
+                            "verifier_command": "/opt/routstr/bin/confidential-verifier",
+                            "verifier_command_digest": "sha256:" + ("b" * 64),
+                        },
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert "runtime-loadable" in response.json()["detail"]
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.api_key
+                    == "sk-test-runtime-unloadable-confidential-policy"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_confidential_mode_without_verifier_policy(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-confidential-mode-without-policy"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "tinfoil",
+                    "base_url": "https://inference.tinfoil.sh/v1",
+                    "api_key": "sk-test-confidential-mode-without-policy",
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "tinfoil",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                        },
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert "runtime-loadable" in response.json()["detail"]
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.api_key
+                    == "sk-test-confidential-mode-without-policy"
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_inline_secret_in_malformed_confidential_policy(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-provider-settings-malformed-secret"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+    base_url = "https://secret-policy-list.tinfoil.example/v1"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "tinfoil",
+                    "base_url": base_url,
+                    "api_key": "sk-test",
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "tinfoil",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                            "policy": [
+                                {
+                                    "repo": "tinfoilsh/confidential-gpt-secure",
+                                    "api_key": "sk-secret-provider-token",
+                                }
+                            ],
+                        }
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert "api_key must not be embedded" in response.json()["detail"]
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == base_url
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_embedded_secret_in_confidential_verifier_command(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-provider-settings-command-secret"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+    base_url = "https://secret-command-policy.tinfoil.example/v1"
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.post(
+                "/admin/api/upstream-providers",
+                json={
+                    "provider_type": "tinfoil",
+                    "base_url": base_url,
+                    "api_key": "sk-test",
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "tinfoil",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                            "policy": {
+                                "repo": "tinfoilsh/confidential-gpt-secure",
+                                "verifier_command": [
+                                    "/opt/routstr/bin/tinfoil-verifier",
+                                    "--token=sk-secret-provider-token",
+                                ],
+                            },
+                        }
+                    },
+                },
+            )
+
+        assert response.status_code == 400
+        assert "secret-like value must not be embedded" in response.json()["detail"]
+
+        rows = (
+            await integration_session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == base_url
+                )
+            )
+        ).all()
+        assert rows == []
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_rejects_inline_secret_confidential_provider_settings_on_update(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token-provider-settings-update-secret"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    provider = UpstreamProviderRow(
+        provider_type="tinfoil",
+        base_url="https://secret-policy-update.tinfoil.example/v1",
+        api_key="sk-upstream-test",
+        enabled=True,
+        provider_fee=1.01,
+        provider_settings=(
+            '{"confidentiality":{"mode":"tinfoil",'
+            '"model_ids":["tinfoil/gpt-secure"],'
+            '"policy":{"repo":"tinfoilsh/confidential-gpt-secure"}}}'
+        ),
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+    original_provider_settings = provider.provider_settings
+
+    try:
+        with (
+            patch("routstr.core.admin.reinitialize_upstreams", new_callable=AsyncMock),
+            patch("routstr.core.admin.refresh_model_maps", new_callable=AsyncMock),
+        ):
+            response = await integration_client.patch(
+                f"/admin/api/upstream-providers/{provider.id}",
+                json={
+                    "provider_settings": {
+                        "confidentiality": {
+                            "mode": "tinfoil",
+                            "model_ids": ["tinfoil/gpt-secure"],
+                            "policy": {
+                                "repo": "tinfoilsh/confidential-gpt-secure",
+                                "api_key": "sk-secret-provider-token",
+                            },
+                        }
+                    }
+                },
+            )
+
+        assert response.status_code == 400
+        assert "api_key must not be embedded" in response.json()["detail"]
+
+        await integration_session.refresh(provider)
+        assert provider.provider_settings == original_provider_settings
+    finally:
+        admin_sessions.pop(admin_token, None)
 
 
 @pytest.mark.integration

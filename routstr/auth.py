@@ -13,6 +13,7 @@ from sqlmodel import col, select, update
 
 from .core import get_logger
 from .core.db import ApiKey, AsyncSession, accumulate_routstr_fee
+from .core.logging import credential_fingerprint, redact_sensitive_text
 from .core.settings import settings
 from .payment.cost_calculation import (
     CostData,
@@ -94,9 +95,7 @@ async def validate_bearer_key(
     logger.debug(
         "Starting bearer key validation",
         extra={
-            "key_preview": bearer_key[:20] + "..."
-            if len(bearer_key) > 20
-            else bearer_key,
+            "key_fingerprint": credential_fingerprint(bearer_key),
             "has_refund_address": bool(refund_address),
             "has_expiry_time": bool(key_expiry_time),
             "min_cost": min_cost,
@@ -119,7 +118,7 @@ async def validate_bearer_key(
     if bearer_key.startswith("sk-"):
         logger.debug(
             "Processing sk- prefixed API key",
-            extra={"key_preview": bearer_key[:10] + "..."},
+            extra={"key_fingerprint": credential_fingerprint(bearer_key)},
         )
 
         if existing_key := await session.get(ApiKey, bearer_key[3:]):
@@ -148,9 +147,9 @@ async def validate_bearer_key(
                     "Updated refund address",
                     extra={
                         "key_hash": existing_key.hashed_key[:8] + "...",
-                        "refund_address_preview": refund_address[:20] + "..."
-                        if len(refund_address) > 20
-                        else refund_address,
+                        "refund_address_fingerprint": credential_fingerprint(
+                            refund_address
+                        ),
                     },
                 )
 
@@ -202,14 +201,14 @@ async def validate_bearer_key(
         else:
             logger.warning(
                 "sk- API key not found in database",
-                extra={"key_preview": bearer_key[:10] + "..."},
+                extra={"key_fingerprint": credential_fingerprint(bearer_key)},
             )
 
     if bearer_key.startswith("cashu"):
         logger.debug(
             "Processing Cashu token",
             extra={
-                "token_preview": bearer_key[:20] + "...",
+                "token_fingerprint": credential_fingerprint(bearer_key),
                 "token_type": bearer_key[:6] if len(bearer_key) >= 6 else bearer_key,
             },
         )
@@ -247,9 +246,9 @@ async def validate_bearer_key(
                         "Updated refund address for existing Cashu key",
                         extra={
                             "key_hash": existing_key.hashed_key[:8] + "...",
-                            "refund_address_preview": refund_address[:20] + "..."
-                            if len(refund_address) > 20
-                            else refund_address,
+                            "refund_address_fingerprint": credential_fingerprint(
+                                refund_address
+                            ),
                         },
                     )
 
@@ -319,7 +318,7 @@ async def validate_bearer_key(
 
             logger.debug(
                 "AUTH: About to call credit_balance",
-                extra={"token_preview": bearer_key[:50]},
+                extra={"token_fingerprint": credential_fingerprint(bearer_key)},
             )
             try:
                 msats = await credit_balance(bearer_key, new_key, session)
@@ -327,10 +326,11 @@ async def validate_bearer_key(
                     "AUTH: credit_balance returned successfully", extra={"msats": msats}
                 )
             except Exception as credit_error:
+                error = str(redact_sensitive_text(str(credit_error)))
                 logger.error(
                     "AUTH: credit_balance failed",
                     extra={
-                        "error": str(credit_error),
+                        "error": error,
                         "error_type": type(credit_error).__name__,
                     },
                 )
@@ -359,33 +359,32 @@ async def validate_bearer_key(
         except HTTPException:
             raise
         except Exception as e:
+            error = str(redact_sensitive_text(str(e)))
             logger.error(
                 "Cashu token redemption failed",
                 extra={
-                    "error": str(e),
+                    "error": error,
                     "error_type": type(e).__name__,
-                    "token_preview": bearer_key[:20] + "..."
-                    if len(bearer_key) > 20
-                    else bearer_key,
+                    "token_fingerprint": credential_fingerprint(bearer_key),
                 },
             )
             raise HTTPException(
                 status_code=401,
                 detail={
                     "error": {
-                        "message": f"Invalid or expired Cashu key: {str(e)}",
+                        "message": f"Invalid or expired Cashu key: {error}",
                         "type": "invalid_request_error",
                         "code": "invalid_api_key",
                     }
                 },
             )
 
-    key_preview = bearer_key[:10] + "..." if len(bearer_key) > 10 else bearer_key
+    key_fingerprint = credential_fingerprint(bearer_key)
     logger.error(
-        f"Invalid API key format: preview={key_preview!r} length={len(bearer_key)} "
+        f"Invalid API key format: fingerprint={key_fingerprint!r} length={len(bearer_key)} "
         f"(expected 'sk-...' or 'cashu...' token)",
         extra={
-            "key_preview": key_preview,
+            "key_fingerprint": key_fingerprint,
             "key_length": len(bearer_key),
         },
     )

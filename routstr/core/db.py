@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 import sqlite3
@@ -109,7 +110,50 @@ class ModelRow(SQLModel, table=True):  # type: ignore
         default=None,
         description="Model ID to use when forwarding requests to upstream provider. Defaults to id if not set.",
     )
+    last_seen_at: int | None = Field(
+        default=None,
+        description="Unix timestamp when provider discovery last returned this model",
+    )
+    availability_status: str | None = Field(
+        default=None,
+        description="manual, available, unavailable, or refresh_failed",
+    )
+    capabilities_json: str | None = Field(
+        default=None,
+        description="Provider-discovered model capabilities as canonical JSON",
+    )
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
+
+
+class ProviderModelAttestationRow(SQLModel, table=True):  # type: ignore
+    __tablename__ = "provider_model_attestations"
+
+    provider_id: int = Field(
+        primary_key=True,
+        foreign_key="upstream_providers.id",
+        ondelete="CASCADE",
+    )
+    model_id: str = Field(primary_key=True)
+    mode: str = Field(primary_key=True)
+    verified: bool = Field(default=False)
+    verified_at: int | None = Field(default=None)
+    expires_at: int | None = Field(default=None)
+    policy_digest: str | None = Field(default=None)
+    evidence_digest: str | None = Field(default=None)
+    verifier: str | None = Field(default=None)
+    claims_json: str | None = Field(default=None)
+    failure_reason: str | None = Field(default=None)
+    updated_at: int = Field(default_factory=lambda: int(time.time()))
+
+
+def canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
 
 
 class LightningInvoice(SQLModel, table=True):  # type: ignore

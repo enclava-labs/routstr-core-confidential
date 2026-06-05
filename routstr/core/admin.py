@@ -1,6 +1,8 @@
 import asyncio
 import json
+import math
 import secrets
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,7 +11,7 @@ from pydantic import BaseModel, RootModel
 from pydantic.v1 import ValidationError as PydanticValidationError
 from sqlmodel import select
 
-from ..payment.models import _row_to_model, list_models
+from ..payment.models import Pricing, _row_to_model, list_models
 from ..proxy import refresh_model_maps, reinitialize_upstreams
 from ..wallet import (
     fetch_all_balances,
@@ -28,6 +30,7 @@ from .db import (
 )
 from .log_manager import log_manager
 from .logging import get_logger
+from .policy_secrets import inline_policy_secret_violations
 from .settings import SettingsService, settings
 
 logger = get_logger(__name__)
@@ -38,6 +41,24 @@ admin_sessions: dict[str, int] = {}
 ADMIN_SESSION_DURATION = 3600
 # Usage analytics remain queryable up to 12 months.
 MAX_USAGE_ANALYTICS_HOURS = 365 * 24
+SENSITIVE_SETTINGS_FIELDS = {
+    "admin_password",
+    "nsec",
+    "routstr_attestation_hpke_key_config_b64",
+    "routstr_attestation_public_key",
+    "routstr_tee_attestation_command",
+    "routstr_tee_verifier_command",
+    "routstr_tee_verifier_policy_json",
+    "upstream_api_key",
+}
+
+
+def _redact_settings_response(data: Mapping[str, object]) -> dict[str, object]:
+    redacted = dict(data)
+    for field in SENSITIVE_SETTINGS_FIELDS:
+        if field in redacted:
+            redacted[field] = "[REDACTED]" if redacted[field] else ""
+    return redacted
 
 
 async def require_admin_api(request: Request) -> None:
@@ -133,14 +154,7 @@ async def get_balances_api(request: Request) -> list[dict[str, object]]:
 
 @admin_router.get("/api/settings", dependencies=[Depends(require_admin_api)])
 async def get_settings(request: Request) -> dict:
-    data = settings.dict()
-    if "upstream_api_key" in data:
-        data["upstream_api_key"] = "[REDACTED]" if data["upstream_api_key"] else ""
-    if "admin_password" in data:
-        data["admin_password"] = "[REDACTED]" if data["admin_password"] else ""
-    if "nsec" in data:
-        data["nsec"] = "[REDACTED]" if data["nsec"] else ""
-    return data
+    return _redact_settings_response(settings.dict())
 
 
 class SettingsUpdate(RootModel[dict[str, object]]):
@@ -156,8 +170,7 @@ class PasswordUpdate(BaseModel):
 async def update_settings(request: Request, update: SettingsUpdate) -> dict:
     # Remove sensitive fields from general settings update
     settings_data = update.root.copy()
-    sensitive_fields = ["admin_password", "upstream_api_key", "nsec"]
-    for field in sensitive_fields:
+    for field in SENSITIVE_SETTINGS_FIELDS:
         if field in settings_data:
             del settings_data[field]
 
@@ -168,14 +181,7 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict:
         # Surface validation issues (e.g. non-positive payout amounts)
         # as a clean 400 instead of a 500.
         raise HTTPException(status_code=400, detail=e.errors()) from e
-    data = new_settings.dict()
-    if "upstream_api_key" in data:
-        data["upstream_api_key"] = "[REDACTED]" if data["upstream_api_key"] else ""
-    if "admin_password" in data:
-        data["admin_password"] = "[REDACTED]" if data["admin_password"] else ""
-    if "nsec" in data:
-        data["nsec"] = "[REDACTED]" if data["nsec"] else ""
-    return data
+    return _redact_settings_response(new_settings.dict())
 
 
 @admin_router.patch("/api/password", dependencies=[Depends(require_admin_api)])
@@ -387,6 +393,52 @@ class ModelCreate(BaseModel):
     forwarded_model_id: str | None = None
 
 
+def _strict_json_to_string(value: object, label: str) -> str:
+    try:
+        return json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} must be strict standard JSON",
+        ) from exc
+
+
+def _model_payload_json_fields(payload: ModelCreate) -> dict[str, str | None]:
+    pricing_json = _strict_json_to_string(payload.pricing, "model pricing")
+    try:
+        Pricing.parse_obj(payload.pricing)
+    except PydanticValidationError as exc:
+        detail = (
+            "model pricing values must be finite"
+            if "pricing values must be finite" in str(exc)
+            else "model pricing is invalid"
+        )
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+    return {
+        "architecture": _strict_json_to_string(
+            payload.architecture,
+            "model architecture",
+        ),
+        "pricing": pricing_json,
+        "per_request_limits": _strict_json_to_string(
+            payload.per_request_limits,
+            "model per_request_limits",
+        )
+        if payload.per_request_limits is not None
+        else None,
+        "top_provider": _strict_json_to_string(
+            payload.top_provider,
+            "model top_provider",
+        )
+        if payload.top_provider
+        else None,
+        "alias_ids": _strict_json_to_string(payload.alias_ids, "model alias_ids")
+        if payload.alias_ids
+        else None,
+    }
+
+
 @admin_router.post(
     "/api/upstream-providers/{provider_id}/models",
     dependencies=[Depends(require_admin_api)],
@@ -403,6 +455,8 @@ async def upsert_provider_model(
         if not provider:
             raise HTTPException(status_code=404, detail="Provider not found")
 
+        payload_json = _model_payload_json_fields(payload)
+
         # Try to get existing model
         existing_row = await session.get(ModelRow, (payload.id, provider_id))
 
@@ -413,21 +467,13 @@ async def upsert_provider_model(
             existing_row.description = payload.description
             existing_row.created = int(payload.created)
             existing_row.context_length = int(payload.context_length)
-            existing_row.architecture = json.dumps(payload.architecture)
-            existing_row.pricing = json.dumps(payload.pricing)
+            existing_row.architecture = payload_json["architecture"] or "{}"
+            existing_row.pricing = payload_json["pricing"] or "{}"
             existing_row.sats_pricing = None
-            existing_row.per_request_limits = (
-                json.dumps(payload.per_request_limits)
-                if payload.per_request_limits is not None
-                else None
-            )
-            existing_row.top_provider = (
-                json.dumps(payload.top_provider) if payload.top_provider else None
-            )
+            existing_row.per_request_limits = payload_json["per_request_limits"]
+            existing_row.top_provider = payload_json["top_provider"]
             existing_row.canonical_slug = payload.canonical_slug
-            existing_row.alias_ids = (
-                json.dumps(payload.alias_ids) if payload.alias_ids else None
-            )
+            existing_row.alias_ids = payload_json["alias_ids"]
             existing_row.enabled = payload.enabled
             existing_row.forwarded_model_id = payload.forwarded_model_id or payload.id
 
@@ -445,21 +491,13 @@ async def upsert_provider_model(
                 description=payload.description,
                 created=int(payload.created),
                 context_length=int(payload.context_length),
-                architecture=json.dumps(payload.architecture),
-                pricing=json.dumps(payload.pricing),
+                architecture=payload_json["architecture"] or "{}",
+                pricing=payload_json["pricing"] or "{}",
                 sats_pricing=None,
-                per_request_limits=(
-                    json.dumps(payload.per_request_limits)
-                    if payload.per_request_limits is not None
-                    else None
-                ),
-                top_provider=(
-                    json.dumps(payload.top_provider) if payload.top_provider else None
-                ),
+                per_request_limits=payload_json["per_request_limits"],
+                top_provider=payload_json["top_provider"],
                 canonical_slug=payload.canonical_slug,
-                alias_ids=(
-                    json.dumps(payload.alias_ids) if payload.alias_ids else None
-                ),
+                alias_ids=payload_json["alias_ids"],
                 upstream_provider_id=provider_id,
                 enabled=payload.enabled,
                 forwarded_model_id=payload.forwarded_model_id or payload.id,
@@ -566,6 +604,7 @@ async def batch_override_provider_models(
         overridden_count = 0
 
         for model_data in payload.models:
+            model_json = _model_payload_json_fields(model_data)
             # Try to get existing model regardless of whether it's enabled or not
             existing_row = await session.get(ModelRow, (model_data.id, provider_id))
 
@@ -575,23 +614,13 @@ async def batch_override_provider_models(
                 existing_row.description = model_data.description
                 existing_row.created = int(model_data.created)
                 existing_row.context_length = int(model_data.context_length)
-                existing_row.architecture = json.dumps(model_data.architecture)
-                existing_row.pricing = json.dumps(model_data.pricing)
+                existing_row.architecture = model_json["architecture"] or "{}"
+                existing_row.pricing = model_json["pricing"] or "{}"
                 existing_row.sats_pricing = None
-                existing_row.per_request_limits = (
-                    json.dumps(model_data.per_request_limits)
-                    if model_data.per_request_limits is not None
-                    else None
-                )
-                existing_row.top_provider = (
-                    json.dumps(model_data.top_provider)
-                    if model_data.top_provider
-                    else None
-                )
+                existing_row.per_request_limits = model_json["per_request_limits"]
+                existing_row.top_provider = model_json["top_provider"]
                 existing_row.canonical_slug = model_data.canonical_slug
-                existing_row.alias_ids = (
-                    json.dumps(model_data.alias_ids) if model_data.alias_ids else None
-                )
+                existing_row.alias_ids = model_json["alias_ids"]
                 existing_row.enabled = model_data.enabled
                 session.add(existing_row)
             else:
@@ -602,25 +631,13 @@ async def batch_override_provider_models(
                     description=model_data.description,
                     created=int(model_data.created),
                     context_length=int(model_data.context_length),
-                    architecture=json.dumps(model_data.architecture),
-                    pricing=json.dumps(model_data.pricing),
+                    architecture=model_json["architecture"] or "{}",
+                    pricing=model_json["pricing"] or "{}",
                     sats_pricing=None,
-                    per_request_limits=(
-                        json.dumps(model_data.per_request_limits)
-                        if model_data.per_request_limits is not None
-                        else None
-                    ),
-                    top_provider=(
-                        json.dumps(model_data.top_provider)
-                        if model_data.top_provider
-                        else None
-                    ),
+                    per_request_limits=model_json["per_request_limits"],
+                    top_provider=model_json["top_provider"],
                     canonical_slug=model_data.canonical_slug,
-                    alias_ids=(
-                        json.dumps(model_data.alias_ids)
-                        if model_data.alias_ids
-                        else None
-                    ),
+                    alias_ids=model_json["alias_ids"],
                     upstream_provider_id=provider_id,
                     enabled=model_data.enabled,
                 )
@@ -658,6 +675,338 @@ class UpstreamProviderUpdate(BaseModel):
     provider_settings: dict | None = None
 
 
+def _provider_settings_secret_violations(
+    provider_settings: Mapping[str, object],
+) -> list[str]:
+    return inline_policy_secret_violations(
+        dict(provider_settings),
+        policy_name="provider_settings",
+    )
+
+
+def _is_template_placeholder_digest(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    digest = value.strip().lower()
+    if digest.startswith("sha256:"):
+        digest = digest.removeprefix("sha256:")
+    return (
+        len(digest) in {64, 96}
+        and all(char in "0123456789abcdef" for char in digest)
+        and len(set(digest)) == 1
+    )
+
+
+def _placeholder_digest_paths(value: object, path: str = "policy") -> list[str]:
+    if _is_template_placeholder_digest(value):
+        return [path]
+    if isinstance(value, Mapping):
+        paths: list[str] = []
+        for key, item in value.items():
+            key_path = f"{path}.{key}" if isinstance(key, str) else path
+            paths.extend(_placeholder_digest_paths(item, key_path))
+        return paths
+    if isinstance(value, list):
+        paths = []
+        for index, item in enumerate(value):
+            paths.extend(_placeholder_digest_paths(item, f"{path}[{index}]"))
+        return paths
+    return []
+
+
+def _confidential_policy_placeholder_digest_violations(
+    provider_settings: Mapping[str, object],
+) -> list[str]:
+    raw_confidentiality = provider_settings.get("confidentiality")
+    policy_values: list[object] = []
+    if isinstance(raw_confidentiality, Mapping):
+        for key in ("policy", "attestation_policy"):
+            if key in raw_confidentiality:
+                policy_values.append(raw_confidentiality.get(key))
+
+    for key in ("confidentiality_policy", "attestation_policy"):
+        if key in provider_settings:
+            policy_values.append(provider_settings.get(key))
+
+    violations: list[str] = []
+    seen: set[str] = set()
+    for policy in policy_values:
+        for path in _placeholder_digest_paths(policy):
+            violation = f"{path} must not contain placeholder digest"
+            if violation not in seen:
+                violations.append(violation)
+                seen.add(violation)
+    return violations
+
+
+CONFIDENTIAL_MODE_PROVIDER_TYPES = {
+    "tinfoil": "tinfoil",
+    "ppq-private-tee": "ppq-private",
+    "privatemode": "privatemode",
+}
+CONFIDENTIAL_PROVIDER_TYPE_MODES = {
+    provider_type: mode for mode, provider_type in CONFIDENTIAL_MODE_PROVIDER_TYPES.items()
+}
+SUPPORTED_CONFIDENTIAL_PROVIDER_MODES = (
+    "tinfoil",
+    "ppq-private-tee",
+    "privatemode",
+)
+
+
+def _confidentiality_mode_provider_type_violation(
+    *,
+    provider_type: str,
+    provider_settings: Mapping[str, object],
+) -> str | None:
+    raw_confidentiality = provider_settings.get("confidentiality")
+    if not isinstance(raw_confidentiality, Mapping):
+        return None
+    raw_mode = raw_confidentiality.get("mode")
+    if raw_mode is None:
+        return None
+    if not isinstance(raw_mode, str) or not raw_mode.strip():
+        return "confidentiality mode must be a non-empty string"
+    mode = raw_mode.strip().lower()
+    expected_provider_type = CONFIDENTIAL_MODE_PROVIDER_TYPES.get(mode)
+    if expected_provider_type is None:
+        supported = (
+            f"{', '.join(SUPPORTED_CONFIDENTIAL_PROVIDER_MODES[:-1])}, "
+            f"or {SUPPORTED_CONFIDENTIAL_PROVIDER_MODES[-1]}"
+        )
+        return f"confidentiality mode must be {supported}"
+    normalized_provider_type = provider_type.strip().lower()
+    if normalized_provider_type != expected_provider_type:
+        return (
+            f"confidentiality mode {mode} does not match provider_type "
+            f"{provider_type}"
+        )
+    return None
+
+
+def _provider_settings_include_confidential_config(
+    provider_settings: Mapping[str, object],
+) -> bool:
+    raw_confidentiality = provider_settings.get("confidentiality")
+    if isinstance(raw_confidentiality, Mapping):
+        for key in (
+            "mode",
+            "model_ids",
+            "model_id_prefixes",
+            "policy",
+            "attestation_policy",
+        ):
+            if key in raw_confidentiality:
+                return True
+    for key in ("confidentiality_policy", "attestation_policy", "policy"):
+        if key in provider_settings:
+            return True
+    return False
+
+
+def _confidentiality_runtime_loadability_violation(
+    *,
+    provider_type: str,
+    base_url: str,
+    provider_settings: Mapping[str, object],
+) -> str | None:
+    if not _provider_settings_include_confidential_config(provider_settings):
+        return None
+    expected_mode = CONFIDENTIAL_PROVIDER_TYPE_MODES.get(provider_type.strip().lower())
+    if expected_mode is None:
+        return None
+
+    from ..upstream.base import ConfidentialVerifierPolicy
+
+    try:
+        policy = ConfidentialVerifierPolicy.from_provider_settings(
+            provider_type=provider_type,
+            base_url=base_url,
+            provider_settings=provider_settings,
+        )
+    except Exception as exc:
+        return f"confidential provider settings are not runtime-loadable: {exc}"
+    if policy is None:
+        return "confidential provider settings are not runtime-loadable by Routstr runtime"
+    if policy.mode != expected_mode:
+        return (
+            f"confidentiality mode {policy.mode} does not match provider_type "
+            f"{provider_type}"
+        )
+    from ..upstream.confidential_verifiers import (
+        _ppq_private_model_selector_policy_violations,
+        _privatemode_component_policy_violations,
+        _privatemode_model_workload_policy_violations,
+        _privatemode_workload_policy_violations,
+        _tinfoil_model_attestation_policy_violations,
+    )
+
+    normalized_provider_type = provider_type.strip().lower()
+    policy_violations: list[str] = []
+    if normalized_provider_type in {"tinfoil", "ppq-private"}:
+        if normalized_provider_type == "ppq-private":
+            policy_violations.extend(
+                _ppq_private_model_selector_policy_violations(policy)
+            )
+        policy_violations.extend(_tinfoil_model_attestation_policy_violations(policy))
+    elif normalized_provider_type == "privatemode":
+        policy_violations.extend(
+            _privatemode_component_policy_violations(policy.policy)
+        )
+        policy_violations.extend(_privatemode_workload_policy_violations(policy.policy))
+        policy_violations.extend(_privatemode_model_workload_policy_violations(policy))
+    if policy_violations:
+        return "confidential provider settings are not runtime-loadable: " + "; ".join(
+            policy_violations
+        )
+    return None
+
+
+def _validate_provider_settings_for_type(
+    *,
+    provider_type: str,
+    base_url: str,
+    provider_settings: Mapping[str, object],
+) -> None:
+    if mode_violation := _confidentiality_mode_provider_type_violation(
+        provider_type=provider_type,
+        provider_settings=provider_settings,
+    ):
+        raise HTTPException(status_code=400, detail=mode_violation)
+
+    if loadability_violation := _confidentiality_runtime_loadability_violation(
+        provider_type=provider_type,
+        base_url=base_url,
+        provider_settings=provider_settings,
+    ):
+        raise HTTPException(status_code=400, detail=loadability_violation)
+
+    if provider_type != "ppq-private":
+        return
+
+    raw_catalog_base_url = provider_settings.get("catalog_base_url")
+    if raw_catalog_base_url is None:
+        return
+
+    from ..upstream.ppqai import _ppq_private_catalog_url_violation
+
+    if violation := _ppq_private_catalog_url_violation(
+        provider_base_url=base_url,
+        catalog_base_url=raw_catalog_base_url,
+    ):
+        raise HTTPException(status_code=400, detail=violation)
+
+
+def _provider_settings_to_json(
+    provider_settings: dict | None,
+) -> str | None:
+    if not provider_settings:
+        return None
+    secret_violations = _provider_settings_secret_violations(provider_settings)
+    if secret_violations:
+        raise HTTPException(
+            status_code=400,
+            detail="; ".join(secret_violations),
+        )
+    placeholder_violations = _confidential_policy_placeholder_digest_violations(
+        provider_settings
+    )
+    if placeholder_violations:
+        raise HTTPException(
+            status_code=400,
+            detail="; ".join(placeholder_violations),
+        )
+    return _strict_json_to_string(provider_settings, "provider_settings")
+
+
+def _provider_settings_from_json(value: str | None) -> dict[str, object] | None:
+    if not value:
+        return None
+
+    def reject_json_constant(constant: str) -> None:
+        raise ValueError(f"provider_settings must not contain {constant}")
+
+    try:
+        parsed = json.loads(
+            value,
+            parse_constant=reject_json_constant,
+        )
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _validate_provider_fee(provider_fee: float | None) -> float | None:
+    if provider_fee is None:
+        return None
+    if not math.isfinite(provider_fee):
+        raise HTTPException(
+            status_code=400,
+            detail="provider_fee must be a finite number",
+        )
+    if provider_fee <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="provider_fee must be positive",
+        )
+    return provider_fee
+
+
+def _registered_provider_class(provider_type: str):
+    from ..upstream import upstream_provider_classes
+
+    return next(
+        (
+            cls
+            for cls in upstream_provider_classes
+            if cls.provider_type == provider_type
+        ),
+        None,
+    )
+
+
+def _normalize_provider_base_url(value: str) -> str:
+    return value.strip().rstrip("/")
+
+
+def _validate_provider_identity(
+    *,
+    provider_type: str,
+    base_url: str,
+) -> tuple[str, str]:
+    from ..upstream.base import _privatemode_proxy_base_url_violation
+    from ..upstream.ppqai import _ppq_private_base_url_violation
+
+    provider_class = _registered_provider_class(provider_type)
+    if provider_class is None:
+        raise HTTPException(status_code=400, detail="Provider type is not registered")
+
+    metadata = provider_class.get_provider_metadata()
+    normalized_base_url = _normalize_provider_base_url(base_url)
+    default_base_url = _normalize_provider_base_url(
+        str(metadata.get("default_base_url") or "")
+    )
+    if (
+        metadata.get("fixed_base_url") is True
+        and normalized_base_url != default_base_url
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Provider type {provider_type} requires base_url {default_base_url}"
+            ),
+        )
+
+    if provider_type == "privatemode":
+        if violation := _privatemode_proxy_base_url_violation(normalized_base_url):
+            raise HTTPException(status_code=400, detail=violation)
+    if provider_type == "ppq-private":
+        if violation := _ppq_private_base_url_violation(normalized_base_url):
+            raise HTTPException(status_code=400, detail=violation)
+
+    return provider_type, normalized_base_url
+
+
 @admin_router.get("/api/upstream-providers", dependencies=[Depends(require_admin_api)])
 async def get_upstream_providers() -> list[dict[str, object]]:
     async with create_session() as session:
@@ -672,9 +1021,7 @@ async def get_upstream_providers() -> list[dict[str, object]]:
                 "api_version": p.api_version,
                 "enabled": p.enabled,
                 "provider_fee": p.provider_fee,
-                "provider_settings": json.loads(p.provider_settings)
-                if p.provider_settings
-                else None,
+                "provider_settings": _provider_settings_from_json(p.provider_settings),
             }
             for p in providers
         ]
@@ -684,10 +1031,22 @@ async def get_upstream_providers() -> list[dict[str, object]]:
 async def create_upstream_provider(
     payload: UpstreamProviderCreate,
 ) -> dict[str, object]:
+    provider_fee = _validate_provider_fee(payload.provider_fee)
+    provider_settings_json = _provider_settings_to_json(payload.provider_settings)
+    provider_type, base_url = _validate_provider_identity(
+        provider_type=payload.provider_type,
+        base_url=payload.base_url,
+    )
+    if payload.provider_settings:
+        _validate_provider_settings_for_type(
+            provider_type=provider_type,
+            base_url=base_url,
+            provider_settings=payload.provider_settings,
+        )
     async with create_session() as session:
         result = await session.exec(
             select(UpstreamProviderRow).where(
-                UpstreamProviderRow.base_url == payload.base_url,
+                UpstreamProviderRow.base_url == base_url,
                 UpstreamProviderRow.api_key == payload.api_key,
             )
         )
@@ -698,15 +1057,13 @@ async def create_upstream_provider(
             )
 
         provider = UpstreamProviderRow(
-            provider_type=payload.provider_type,
-            base_url=payload.base_url,
+            provider_type=provider_type,
+            base_url=base_url,
             api_key=payload.api_key,
             api_version=payload.api_version,
             enabled=payload.enabled,
-            provider_fee=payload.provider_fee,
-            provider_settings=json.dumps(payload.provider_settings)
-            if payload.provider_settings
-            else None,
+            provider_fee=provider_fee if provider_fee is not None else 1.01,
+            provider_settings=provider_settings_json,
         )
         session.add(provider)
         await session.commit()
@@ -742,9 +1099,7 @@ async def get_upstream_provider(provider_id: int) -> dict[str, object]:
             "api_version": provider.api_version,
             "enabled": provider.enabled,
             "provider_fee": provider.provider_fee,
-            "provider_settings": json.loads(provider.provider_settings)
-            if provider.provider_settings
-            else None,
+            "provider_settings": _provider_settings_from_json(provider.provider_settings),
         }
 
 
@@ -759,10 +1114,35 @@ async def update_upstream_provider(
         if not provider:
             raise HTTPException(status_code=404, detail="Provider not found")
 
+        provider_settings_json = None
+        if payload.provider_settings is not None:
+            provider_settings_json = _provider_settings_to_json(
+                payload.provider_settings
+            )
+
+        provider_type = payload.provider_type or provider.provider_type
+        base_url = payload.base_url or provider.base_url
+        provider_type, base_url = _validate_provider_identity(
+            provider_type=provider_type,
+            base_url=base_url,
+        )
+
+        effective_provider_settings = (
+            payload.provider_settings
+            if payload.provider_settings is not None
+            else _provider_settings_from_json(provider.provider_settings)
+        )
+        if effective_provider_settings is not None:
+            _validate_provider_settings_for_type(
+                provider_type=provider_type,
+                base_url=base_url,
+                provider_settings=effective_provider_settings,
+            )
+
         if payload.provider_type is not None:
-            provider.provider_type = payload.provider_type
+            provider.provider_type = provider_type
         if payload.base_url is not None:
-            provider.base_url = payload.base_url
+            provider.base_url = base_url
         if payload.api_key is not None:
             provider.api_key = payload.api_key
         if payload.api_version is not None:
@@ -770,9 +1150,11 @@ async def update_upstream_provider(
         if payload.enabled is not None:
             provider.enabled = payload.enabled
         if payload.provider_fee is not None:
-            provider.provider_fee = payload.provider_fee
+            provider_fee = _validate_provider_fee(payload.provider_fee)
+            if provider_fee is not None:
+                provider.provider_fee = provider_fee
         if payload.provider_settings is not None:
-            provider.provider_settings = json.dumps(payload.provider_settings)
+            provider.provider_settings = provider_settings_json
 
         session.add(provider)
         await session.commit()
@@ -788,9 +1170,7 @@ async def update_upstream_provider(
         "api_version": provider.api_version,
         "enabled": provider.enabled,
         "provider_fee": provider.provider_fee,
-        "provider_settings": json.loads(provider.provider_settings)
-        if provider.provider_settings
-        else None,
+        "provider_settings": _provider_settings_from_json(provider.provider_settings),
     }
 
 

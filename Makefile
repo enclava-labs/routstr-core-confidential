@@ -16,7 +16,10 @@ else
     ALEMBIC := alembic
 endif
 
-.PHONY: help setup test test-unit test-integration test-integration-docker test-all test-fast test-performance clean docker-up docker-down lint format type-check dev-setup check-deps db-upgrade db-downgrade db-current db-history db-migrate db-revision db-heads db-clean ui-build ui-build-docker ui-dev
+.PHONY: help setup test test-unit test-integration test-integration-docker test-all test-fast test-performance clean docker-up docker-down lint format type-check confidential-preflight confidential-verifier-test confidential-live-check dev-setup check-deps db-upgrade db-downgrade db-current db-history db-migrate db-revision db-heads db-clean ui-build ui-build-docker ui-dev
+
+PREFLIGHT_ARGS = $(strip $(foreach policy,$(POLICY_JSON),--policy-json "$(policy)") $(if $(ATTESTATION_TARGETS_JSON),--attestation-targets-json "$(ATTESTATION_TARGETS_JSON)") $(if $(STRICT_ATTESTATION_TARGETS),--strict-attestation-targets) $(if $(ATTESTATION_RESULTS_JSON),--attestation-results-json "$(ATTESTATION_RESULTS_JSON)") $(if $(MAX_ATTESTATION_RESULT_AGE_SECONDS),--max-attestation-result-age-seconds "$(MAX_ATTESTATION_RESULT_AGE_SECONDS)") $(if $(STRICT_ATTESTATION_RESULTS),--strict-attestation-results) $(if $(PROVIDER_CATALOG_JSON),--provider-catalog-json "$(PROVIDER_CATALOG_JSON)") $(if $(STRICT_PROVIDER_CATALOG),--strict-provider-catalog) $(if $(VERIFY_ARTIFACTS),--verify-artifacts) $(if $(STRICT_ENV),--strict-env) $(if $(STRICT_DEPLOYMENT_READY),--strict-deployment-ready) $(if $(PREFLIGHT_JSON),--json))
+LIVE_CHECK_EXPECT_ARGS = $(strip $(foreach expected,$(EXPECT_PROVIDER),--expect-provider "$(expected)") $(foreach expected,$(EXPECT_INFERENCE),--expect-inference "$(expected)"))
 
 # Default target
 help:
@@ -34,6 +37,9 @@ help:
 	@echo "  make lint               - Run linting checks"
 	@echo "  make format             - Format code with ruff"
 	@echo "  make type-check         - Run mypy type checking"
+	@echo "  make confidential-preflight [POLICY_JSON=\"provider.json ...\" ATTESTATION_TARGETS_JSON=... STRICT_ATTESTATION_TARGETS=1 ATTESTATION_RESULTS_JSON=... MAX_ATTESTATION_RESULT_AGE_SECONDS=86400 STRICT_ATTESTATION_RESULTS=1 PROVIDER_CATALOG_JSON=... STRICT_PROVIDER_CATALOG=1 VERIFY_ARTIFACTS=1 STRICT_ENV=1 STRICT_DEPLOYMENT_READY=1 PREFLIGHT_JSON=1] - Build/digest confidential routing verifiers"
+	@echo "  make confidential-verifier-test - Run standalone confidential verifier Go tests"
+	@echo "  make confidential-live-check ROUTSTR_URL=... EXPECT_PROVIDER=provider:model [EXPECT_INFERENCE=provider:model:endpoint PROVIDER_CATALOG_JSON=... ATTESTATION_TARGETS_JSON=... ATTESTATION_RESULTS_JSON=... MAX_ATTESTATION_RESULT_AGE_SECONDS=86400 STRICT_EXTERNAL_GUARDRAILS=1 RUN_INFERENCE=1 STRICT_INFERENCE_EXERCISED=1 STRICT_CONFIDENTIAL_ROUTES_READY=1 BEARER_TOKEN_ENV=... LIVE_CHECK_JSON=1]"
 	@echo "  make dev-setup          - Set up development environment"
 	@echo "  make check-deps         - Check system dependencies"
 	@echo "  make setup              - First-time project setup"
@@ -108,6 +114,36 @@ format:
 type-check:
 	@echo "🔎 Running type checks..."
 	$(MYPY) routstr/ --ignore-missing-imports
+
+confidential-preflight:
+	@echo "🔐 Building confidential routing verifier artifacts..."
+	$(PYTHON) scripts/confidential_routing_preflight.py$(if $(PREFLIGHT_ARGS), $(PREFLIGHT_ARGS))
+
+confidential-verifier-test:
+	@echo "🔐 Running standalone confidential verifier tests..."
+	cd verifiers/tinfoil-go && go test -count=1 ./...
+	cd verifiers/privatemode-go && go test -count=1 -tags contrast_unstable_api ./...
+	cd verifiers/routstr-tee-go && go test -count=1 ./...
+	cd verifiers/routstr-tee-attest-go && go test -count=1 ./...
+
+confidential-live-check:
+	@test -n "$(ROUTSTR_URL)" || (echo "ROUTSTR_URL is required" && exit 1)
+	@test -n "$(strip $(EXPECT_PROVIDER) $(EXPECT_INFERENCE))" || (echo "EXPECT_PROVIDER=provider:model or EXPECT_INFERENCE=provider:model:endpoint is required" && exit 1)
+	$(PYTHON) scripts/confidential_routing_live_check.py "$(ROUTSTR_URL)" \
+		$(LIVE_CHECK_EXPECT_ARGS) \
+		$(if $(RUN_INFERENCE),--run-inference,) \
+		$(if $(STRICT_INFERENCE_EXERCISED),--strict-inference-exercised,) \
+		$(if $(STRICT_CONFIDENTIAL_ROUTES_READY),--strict-confidential-routes-ready,) \
+		$(if $(BEARER_TOKEN_ENV),--bearer-token-env "$(BEARER_TOKEN_ENV)",) \
+		$(if $(CASHU_TOKEN_ENV),--cashu-token-env "$(CASHU_TOKEN_ENV)",) \
+		$(if $(INFERENCE_PROMPT),--inference-prompt "$(INFERENCE_PROMPT)",) \
+		$(if $(INFERENCE_AUDIO_FILE),--inference-audio-file "$(INFERENCE_AUDIO_FILE)",) \
+		$(if $(PROVIDER_CATALOG_JSON),--provider-catalog-json "$(PROVIDER_CATALOG_JSON)",) \
+		$(if $(STRICT_EXTERNAL_GUARDRAILS),--strict-external-guardrails,) \
+		$(if $(ATTESTATION_TARGETS_JSON),--attestation-targets-json "$(ATTESTATION_TARGETS_JSON)",) \
+		$(if $(ATTESTATION_RESULTS_JSON),--attestation-results-json "$(ATTESTATION_RESULTS_JSON)",) \
+		$(if $(MAX_ATTESTATION_RESULT_AGE_SECONDS),--max-attestation-result-age-seconds "$(MAX_ATTESTATION_RESULT_AGE_SECONDS)",) \
+		$(if $(LIVE_CHECK_JSON),--json,)
 
 # Development setup
 dev-setup:

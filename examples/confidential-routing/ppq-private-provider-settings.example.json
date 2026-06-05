@@ -1,0 +1,25 @@
+{
+  "base_url": "https://api.ppq.ai/private/v1",
+  "confidentiality": {
+    "enabled": true,
+    "mode": "ppq-private-tee",
+    "model_ids": [
+      "private/gpt-oss-120b"
+    ],
+    "policy": {
+      "attestation_bundle_url": "https://api.ppq.ai/private",
+      "repo": "tinfoilsh/confidential-model-router",
+      "expected_release_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "require_model_attestations": true,
+      "model_attestation_targets": {
+        "private/gpt-oss-120b": {
+          "host": "gpt-oss-120b-1.inf10.tinfoil.sh",
+          "repo": "tinfoilsh/confidential-gpt-oss-120b",
+          "expected_release_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      },
+      "verifier_command": "build/confidential-verifiers/routstr-tinfoil-go-verifier",
+      "verifier_command_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  }
+}

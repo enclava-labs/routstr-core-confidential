@@ -11,6 +11,7 @@ from PIL import Image
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
+from ..core.logging import credential_fingerprint, redact_sensitive_text
 from ..core.settings import settings
 from ..wallet import deserialize_token_from_string
 
@@ -22,18 +23,12 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
         cashu_token = x_cashu
         logger.debug(
             "Using X-Cashu token",
-            extra={
-                "token_preview": cashu_token[:20] + "..."
-                if len(cashu_token) > 20
-                else cashu_token
-            },
+            extra={"token_fingerprint": credential_fingerprint(cashu_token)},
         )
     elif auth := headers.get("authorization", None):
         logger.debug(
             "Skipping preflight token balance check for Authorization header",
-            extra={
-                "auth_preview": auth[:20] + "..." if len(auth) > 20 else auth,
-            },
+            extra={"auth_fingerprint": credential_fingerprint(auth)},
         )
         return
     else:
@@ -218,7 +213,11 @@ async def calculate_discounted_max_cost(
     max_tokens_raw = body.get("max_tokens", None)
     if max_tokens_raw is not None:
         try:
+            if isinstance(max_tokens_raw, bool):
+                raise ValueError("max_tokens must not be a boolean")
             max_tokens_int = int(max_tokens_raw)
+            if max_tokens_int <= 0:
+                raise ValueError("max_tokens must be positive")
         except (TypeError, ValueError):
             logger.warning(
                 "Invalid max_tokens; ignoring in cost adjustment",
@@ -420,11 +419,12 @@ def create_error_response(
     token: str | None = None,
 ) -> Response:
     """Create a standardized error response."""
+    safe_message = str(redact_sensitive_text(message))
     return Response(
         content=json.dumps(
             {
                 "error": {
-                    "message": message,
+                    "message": safe_message,
                     "type": error_type,
                     "code": status_code,
                 },

@@ -1,6 +1,10 @@
 from typing import TYPE_CHECKING
 
-from ..payment.models import Model, async_fetch_openrouter_models
+from ..payment.models import (
+    Model,
+    async_fetch_openrouter_models,
+    remote_model_without_public_proof,
+)
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
@@ -66,7 +70,11 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
     async def fetch_models(self) -> list[Model]:
         """Fetch Anthropic models from OpenRouter API filtered by anthropic source."""
         models_data = await async_fetch_openrouter_models(source_filter="anthropic")
-        models = [Model(**model) for model in models_data]  # type: ignore
+        models = [
+            Model(**model)
+            for item in models_data
+            if (model := remote_model_without_public_proof(item)) is not None
+        ]
         for model in models:
             model.alias_ids = [self.transform_model_name(model.id)]
         return models

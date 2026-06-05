@@ -1,12 +1,49 @@
 import os
+from pathlib import Path
 
 import pytest
 from pydantic.v1 import ValidationError
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlmodel import text
+from sqlmodel import SQLModel, select, text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from routstr.core.db import UpstreamProviderRow
 from routstr.core.settings import Settings, SettingsService
+from routstr.upstream.helpers import _seed_providers_from_settings
+
+ROOT = Path(__file__).resolve().parents[2]
+CONFIDENTIAL_ENV_VARS = {
+    "CONFIDENTIAL_ROUTING_MODE",
+    "ROUTSTR_TEE_CLIENT_CONFIDENTIALITY_BOUNDARY",
+    "ROUTSTR_TEE_ATTESTATION_DOCUMENT_FORMAT",
+    "ROUTSTR_TEE_VERIFIER_COMMAND",
+    "ROUTSTR_TEE_VERIFIER_COMMAND_DIGEST",
+    "ROUTSTR_TEE_ATTESTATION_COMMAND",
+    "ROUTSTR_TEE_ATTESTATION_COMMAND_DIGEST",
+    "ROUTSTR_TEE_ATTESTATION_REQUIRED",
+    "ROUTSTR_TEE_PUBLIC_KEY_PATH",
+    "ROUTSTR_TEE_ATTESTED_TLS_PUBLIC_KEY_DIGEST",
+    "ROUTSTR_TEE_HPKE_KEY_CONFIG_PATH",
+    "ROUTSTR_TEE_VERIFIER_POLICY_JSON",
+}
+
+
+def test_env_example_surfaces_confidential_routing_deployment_knobs() -> None:
+    contents = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "examples/confidential-routing/" in contents
+    for env_var in CONFIDENTIAL_ENV_VARS:
+        assert env_var in contents
+
+
+def test_confidential_routing_required_defaults_to_provider_attestation_only(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("ROUTSTR_TEE_ATTESTATION_REQUIRED", raising=False)
+
+    settings = Settings()
+
+    assert settings.routstr_tee_attestation_required is False
 
 
 @pytest.mark.asyncio
@@ -47,6 +84,107 @@ async def test_settings_db_precedence_over_env() -> None:
         assert again.enable_analytics_sharing is False
 
 
+@pytest.mark.asyncio
+async def test_confidential_routing_deployment_controls_are_env_authoritative(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CONFIDENTIAL_ROUTING_MODE", "required")
+    monkeypatch.setenv(
+        "ROUTSTR_TEE_CLIENT_CONFIDENTIALITY_BOUNDARY",
+        "attested-tls-termination",
+    )
+    monkeypatch.setenv("ROUTSTR_TEE_VERIFIER_COMMAND", "/opt/routstr/verifier")
+    monkeypatch.setenv(
+        "ROUTSTR_TEE_VERIFIER_COMMAND_DIGEST",
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    )
+    monkeypatch.setenv(
+        "ROUTSTR_TEE_ATTESTED_TLS_PUBLIC_KEY_DIGEST",
+        "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    )
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await SettingsService.initialize(session)
+
+        await session.exec(  # type: ignore
+            text(
+                "UPDATE settings SET data = :data WHERE id = 1"
+            ).bindparams(
+                data=(
+                    '{"name":"DBName",'
+                    '"confidential_routing_mode":"disabled",'
+                    '"routstr_tee_client_confidentiality_boundary":"plaintext-proxy",'
+                    '"routstr_tee_attested_tls_public_key_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+                    '"routstr_tee_verifier_command":"/tmp/unpinned-verifier",'
+                    '"routstr_tee_verifier_command_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+                )
+            )
+        )
+        await session.commit()
+
+        reloaded = await SettingsService.initialize(session)
+
+        assert reloaded.name == "DBName"
+        assert reloaded.confidential_routing_mode == "required"
+        assert (
+            reloaded.routstr_tee_client_confidentiality_boundary
+            == "attested-tls-termination"
+        )
+        assert reloaded.routstr_tee_verifier_command == "/opt/routstr/verifier"
+        assert (
+            reloaded.routstr_tee_verifier_command_digest
+            == "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        )
+        assert (
+            reloaded.routstr_tee_attested_tls_public_key_digest
+            == "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        )
+
+        updated = await SettingsService.update(
+            {
+                "confidential_routing_mode": "disabled",
+                "routstr_tee_client_confidentiality_boundary": "plaintext-proxy",
+                "routstr_tee_attested_tls_public_key_digest": (
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                ),
+                "routstr_tee_verifier_command": "/tmp/other-verifier",
+            },
+            session,
+        )
+
+        assert updated.confidential_routing_mode == "required"
+        assert (
+            updated.routstr_tee_client_confidentiality_boundary
+            == "attested-tls-termination"
+        )
+        assert updated.routstr_tee_verifier_command == "/opt/routstr/verifier"
+        assert (
+            updated.routstr_tee_attested_tls_public_key_digest
+            == "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        )
+
+        await session.exec(  # type: ignore
+            text(
+                "UPDATE settings SET data = :data WHERE id = 1"
+            ).bindparams(
+                data=(
+                    '{"confidential_routing_mode":"disabled",'
+                    '"routstr_tee_client_confidentiality_boundary":"plaintext-proxy"}'
+                )
+            )
+        )
+        await session.commit()
+
+        loaded = await SettingsService.reload_from_db(session)
+
+        assert loaded.confidential_routing_mode == "required"
+        assert (
+            loaded.routstr_tee_client_confidentiality_boundary
+            == "attested-tls-termination"
+        )
+
+
 def test_payout_settings_have_sensible_defaults() -> None:
     s = Settings()
     assert s.min_payout_sat == 210
@@ -72,6 +210,43 @@ def test_payout_settings_accept_custom_positive_values() -> None:
     s = Settings(min_payout_sat=500, payout_interval_seconds=60)
     assert s.min_payout_sat == 500
     assert s.payout_interval_seconds == 60
+
+
+def test_confidential_routing_mode_rejects_unknown_values() -> None:
+    with pytest.raises(ValidationError):
+        Settings(confidential_routing_mode="requiredd")
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), 0.0, -1.0])
+def test_upstream_provider_fee_rejects_invalid_values(bad_value: float) -> None:
+    with pytest.raises(ValidationError):
+        Settings(upstream_provider_fee=bad_value)
+
+
+@pytest.mark.asyncio
+async def test_seed_providers_from_settings_preserves_configured_provider_fee(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _seed_providers_from_settings(
+            session,
+            Settings(upstream_provider_fee=1.23),
+        )
+        await session.commit()
+
+        result = await session.exec(
+            select(UpstreamProviderRow).where(
+                UpstreamProviderRow.provider_type == "openai"
+            )
+        )
+        provider = result.one()
+
+    assert provider.provider_fee == 1.23
 
 
 @pytest.mark.asyncio

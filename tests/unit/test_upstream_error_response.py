@@ -14,7 +14,11 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
-from routstr.upstream.base import BaseUpstreamProvider, _is_json_content_type
+from routstr.upstream.base import (
+    BaseUpstreamProvider,
+    ConfidentialityStatus,
+    _is_json_content_type,
+)
 
 
 def _make_request(request_id: str = "req-123") -> Mock:
@@ -148,3 +152,67 @@ async def test_json_error_body_is_passed_through_unchanged(
     assert response.status_code == 400
     assert bytes(response.body) == json_body
     assert response.media_type == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_confidential_json_error_body_is_redacted_before_forwarding(
+    provider: BaseUpstreamProvider,
+) -> None:
+    provider.set_confidentiality_status(
+        ConfidentialityStatus(enabled=True, mode="tinfoil")
+    )
+    json_body = json.dumps(
+        {
+            "error": {
+                "message": (
+                    'verifier failed api_key=SECRET_PROVIDER_KEY '
+                    '"raw_prompt":"SECRET_PROMPT"'
+                ),
+                "debug_url": "https://user:pass@verified.example/v1",
+            }
+        }
+    ).encode()
+    upstream = _make_upstream_response(
+        body=json_body,
+        status_code=502,
+        content_type="application/json",
+    )
+
+    response = await provider.forward_upstream_error_response(
+        _make_request(), "v1/messages", upstream
+    )
+
+    assert response.status_code == 502
+    assert response.media_type == "application/json"
+    body_text = bytes(response.body).decode()
+    payload: dict[str, Any] = json.loads(body_text)
+    assert payload["error"]["message"].startswith("verifier failed")
+    assert "api_key: [REDACTED]" in payload["error"]["message"]
+    assert "raw_prompt: [REDACTED]" in payload["error"]["message"]
+    assert payload["error"]["debug_url"] == "https://verified.example/v1"
+    assert "SECRET_PROVIDER_KEY" not in body_text
+    assert "SECRET_PROMPT" not in body_text
+    assert "user:pass" not in body_text
+
+
+@pytest.mark.asyncio
+async def test_confidential_non_json_error_redacts_upstream_body_preview(
+    provider: BaseUpstreamProvider,
+) -> None:
+    provider.set_confidentiality_status(
+        ConfidentialityStatus(enabled=True, mode="tinfoil")
+    )
+    upstream = _make_upstream_response(
+        body=b"Service failed while handling SECRET_PROMPT",
+        status_code=503,
+        content_type="text/plain",
+    )
+
+    response = await provider.forward_upstream_error_response(
+        _make_request(), "v1/messages", upstream
+    )
+
+    payload: dict[str, Any] = json.loads(bytes(response.body))
+    assert payload["error"]["type"] == "upstream_error"
+    assert payload["error"]["upstream_body_preview"] is None
+    assert "SECRET_PROMPT" not in bytes(response.body).decode()

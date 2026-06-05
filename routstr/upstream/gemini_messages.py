@@ -60,6 +60,7 @@ from .messages_dispatch import (
 )
 
 logger = get_logger(__name__)
+CONFIDENTIAL_REDACTION_TEXT = "<redacted: confidential route>"
 
 DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
 
@@ -321,15 +322,26 @@ async def _post_and_stream(
         response = await client.send(request, stream=True)
     except Exception as exc:
         await client.aclose()
+        confidential = bool((log_extra or {}).get("confidential"))
         logger.error(
             "Gemini messages dispatch HTTP error",
-            extra={"error": str(exc), "url": url, **(log_extra or {})},
+            extra={
+                "error": CONFIDENTIAL_REDACTION_TEXT if confidential else str(exc),
+                "url": url,
+                **(log_extra or {}),
+            },
         )
+        if confidential:
+            raise UpstreamError(
+                "Failed to reach Gemini upstream on a confidential route",
+                status_code=502,
+            ) from exc
         raise UpstreamError(
             f"Failed to reach Gemini upstream: {exc}", status_code=502
         ) from exc
 
     if response.status_code >= 400:
+        confidential = bool((log_extra or {}).get("confidential"))
         try:
             body_bytes = await response.aread()
         finally:
@@ -340,11 +352,16 @@ async def _post_and_stream(
             "Gemini messages dispatch upstream error",
             extra={
                 "status_code": response.status_code,
-                "body": body_text[:1000],
+                "body": None if confidential else body_text[:1000],
                 "url": url,
                 **(log_extra or {}),
             },
         )
+        if confidential:
+            raise UpstreamError(
+                "Upstream error via gemini compat: confidential upstream body redacted",
+                status_code=response.status_code,
+            )
         raise UpstreamError(
             f"Upstream error via gemini compat: {body_text}",
             status_code=response.status_code,

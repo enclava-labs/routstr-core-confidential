@@ -37,15 +37,18 @@ If you need to modify these messages, ensure you also update the parsing logic i
 - routstr/core/log_manager.py
 """
 
+import hashlib
 import logging.config
 import logging.handlers
 import os
 import re
 import sys
 import tomllib
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from pythonjsonlogger import jsonlogger
 from rich.console import Console
@@ -61,6 +64,41 @@ _console = Console(soft_wrap=True) if _stdout_is_tty else None
 # Define custom TRACE level
 TRACE_LEVEL = 5
 logging.addLevelName(TRACE_LEVEL, "TRACE")
+_STANDARD_LOG_RECORD_ATTRS = {
+    *logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys(),
+    "asctime",
+    "message",
+}
+_SENSITIVE_KEY_NAMES = {
+    "authorization",
+    "x-cashu",
+    "bearer",
+    "bearertoken",
+    "token",
+    "accesstoken",
+    "access_token",
+    "refreshtoken",
+    "refresh_token",
+    "key",
+    "secret",
+    "clientsecret",
+    "client_secret",
+    "password",
+    "cashu_token",
+    "bearer_key",
+    "apikey",
+    "api_key",
+    "nsec",
+    "upstream_api_key",
+    "upstreamapikey",
+    "refund_address",
+    "refundaddress",
+    "prompt",
+    "raw_prompt",
+    "rawprompt",
+    "input",
+    "content",
+}
 
 
 def trace(self: logging.Logger, message: str, *args: Any, **kwargs: Any) -> None:
@@ -71,6 +109,99 @@ def trace(self: logging.Logger, message: str, *args: Any, **kwargs: Any) -> None
 
 # Add the trace method to Logger class
 setattr(logging.Logger, "trace", trace)
+
+
+def redact_url_userinfo(value: object) -> object:
+    """Return URL-like strings without username/password userinfo."""
+    if not isinstance(value, str):
+        return value
+    raw_url = value.strip()
+    if not raw_url:
+        return value
+    try:
+        parsed = urlsplit(raw_url)
+    except Exception:
+        return "<redacted-url>" if "@" in raw_url else value
+    if "@" in parsed.netloc:
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        return urlunsplit(
+            (
+                parsed.scheme,
+                netloc,
+                parsed.path,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+    if "@" in raw_url and not parsed.netloc:
+        return "<redacted-url>"
+    return value
+
+
+def credential_fingerprint(value: object, *, length: int = 16) -> str | None:
+    """Return a stable non-secret fingerprint for credential correlation."""
+    if not isinstance(value, str) or not value:
+        return None
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return f"sha256:{digest[:length]}"
+
+
+def redact_sensitive_text(value: object) -> object:
+    """Return text with common secret-bearing diagnostics redacted."""
+    if not isinstance(value, str):
+        return value
+
+    text = re.sub(
+        r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/@]+@([^\s]+)",
+        r"\1\2",
+        value,
+    )
+    standalone_patterns = [
+        r"Bearer\s+([a-zA-Z0-9_\-\.]{10,})",
+        r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",
+        r"nsec[a-z0-9]+",
+    ]
+    for pattern in standalone_patterns:
+        text = re.sub(pattern, "[REDACTED]", text, flags=re.IGNORECASE)
+
+    for key in _SENSITIVE_KEY_NAMES:
+        key_patterns = [
+            rf'["\']({key})["\']\s*[:=]\s*["\']([^"\']+)["\']',
+            rf'["\']({key})["\']\s*[:=]\s*([a-zA-Z0-9_\-\.=/+]+)',
+            rf"({key})\s*[:=]\s*([a-zA-Z0-9_\-\.=/+]+)",
+            rf'({key})\s*[:=]\s*["\']([^"\']+)["\']',
+        ]
+        for pattern in key_patterns:
+            text = re.sub(
+                pattern,
+                lambda match: f"{match.group(1).lower()}: [REDACTED]",
+                text,
+                flags=re.IGNORECASE,
+            )
+    text = re.sub(
+        r"\bsk-[a-zA-Z0-9_\-\.]{9,}\b",
+        "[REDACTED]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
+
+
+def _redact_structured_log_value(value: object, key: object | None = None) -> object:
+    if isinstance(key, str) and key.lower() in _SENSITIVE_KEY_NAMES:
+        return "[REDACTED]" if value is not None else None
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, Mapping):
+        return {
+            item_key: _redact_structured_log_value(item_value, item_key)
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_structured_log_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_structured_log_value(item) for item in value)
+    return value
 
 
 class DailyRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
@@ -183,46 +314,18 @@ class RequestIdFilter(logging.Filter):
 class SecurityFilter(logging.Filter):
     """Filter to remove sensitive information from logs."""
 
-    SENSITIVE_KEYS = {
-        "authorization",
-        "x-cashu",
-        "bearer",
-        "token",
-        "key",
-        "secret",
-        "password",
-        "cashu_token",
-        "bearer_key",
-        "api_key",
-        "nsec",
-        "upstream_api_key",
-        "refund_address",
-    }
+    SENSITIVE_KEYS = _SENSITIVE_KEY_NAMES
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Filter out sensitive information from log records."""
         try:
-            message = record.getMessage()
-            standalone_patterns = [
-                r"Bearer\s+([a-zA-Z0-9_\-\.]{10,})",  # Bearer token (must be 10 characters or more to reduce false-positives)
-                r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",  # Cashu tokens
-                r"nsec[a-z0-9]+",  # Nostr Public / Private Key
-            ]
-            for pattern in standalone_patterns:
-                message = re.sub(pattern, "[REDACTED]", message, flags=re.IGNORECASE)
-
-            for key in self.SENSITIVE_KEYS:
-                if key in message.lower():
-                    key_patterns = [
-                        rf"{key}\s*[:=]\s*([a-zA-Z0-9_\-\.=/+]+)",  # key:value or key=value (including any variant with spaces)
-                        rf'{key}\s*[:=]\s*["\']([^"\']+)["\']',  # key:"value" or key='value' (including any variant with spaces)
-                    ]
-                    for pattern in key_patterns:
-                        message = re.sub(
-                            pattern, f"{key}: [REDACTED]", message, flags=re.IGNORECASE
-                        )
+            message = str(redact_sensitive_text(record.getMessage()))
             record.msg = message
             record.args = ()
+            for attr, value in list(record.__dict__.items()):
+                if attr in _STANDARD_LOG_RECORD_ATTRS:
+                    continue
+                setattr(record, attr, _redact_structured_log_value(value, attr))
 
         except Exception:
             pass

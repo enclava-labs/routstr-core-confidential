@@ -244,6 +244,9 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             enabled=model.enabled,
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
+            alias_ids=model.alias_ids,
+            forwarded_model_id=model.forwarded_model_id,
+            confidentiality=model.confidentiality,
         )
 
         (
@@ -266,4 +269,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             enabled=model.enabled,
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
+            alias_ids=model.alias_ids,
+            forwarded_model_id=model.forwarded_model_id,
+            confidentiality=model.confidentiality,
         )

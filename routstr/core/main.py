@@ -1,7 +1,8 @@
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +28,11 @@ from ..upstream.auto_topup import periodic_auto_topup
 from ..upstream.litellm_routing import configure_litellm
 from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
 from .admin import admin_router
+from .attestation import (
+    get_routstr_attestation_statement,
+    read_routstr_hpke_key_config,
+)
+from .confidentiality_public import is_full_sha256_digest
 from .db import create_session, init_db, run_migrations
 from .exceptions import general_exception_handler, http_exception_handler
 from .logging import get_logger, setup_logging
@@ -212,9 +218,7 @@ class _ImmutableStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope: Scope) -> StarletteResponse:
         response = await super().get_response(path, scope)
         if response.status_code == 200:
-            response.headers["Cache-Control"] = (
-                "public, max-age=31536000, immutable"
-            )
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 
 
@@ -238,9 +242,147 @@ app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore
 app.add_exception_handler(Exception, general_exception_handler)
 
 
+INFO_CONFIDENTIALITY_PROVIDERS = ("tinfoil", "ppq-private", "privatemode")
+
+
+def _empty_info_routable_with_full_attestation() -> dict[str, list[str]]:
+    return {provider: [] for provider in INFO_CONFIDENTIALITY_PROVIDERS}
+
+
+def _safe_info_routable_with_full_attestation(value: object) -> dict[str, list[str]]:
+    routable = _empty_info_routable_with_full_attestation()
+    if not isinstance(value, dict):
+        return routable
+    for provider in INFO_CONFIDENTIALITY_PROVIDERS:
+        raw_models = value.get(provider, [])
+        if not isinstance(raw_models, list):
+            return _empty_info_routable_with_full_attestation()
+        model_ids: list[str] = []
+        seen: set[str] = set()
+        for raw_model_id in raw_models:
+            if not isinstance(raw_model_id, str) or not raw_model_id.strip():
+                return _empty_info_routable_with_full_attestation()
+            model_id = raw_model_id.strip()
+            normalized = model_id.lower()
+            if normalized in seen:
+                return _empty_info_routable_with_full_attestation()
+            seen.add(normalized)
+            model_ids.append(model_id)
+        routable[provider] = sorted(model_ids)
+    return routable
+
+
+def _safe_info_client_confidentiality(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    if value.get("mode") != "attested-tls-termination":
+        return None
+    if value.get("tls_terminates_in_attested_tee") is not True:
+        return None
+    if value.get("inbound_ehbp_ohttp_request_decryption") is not False:
+        return None
+    return {
+        "mode": "attested-tls-termination",
+        "tls_terminates_in_attested_tee": True,
+        "inbound_ehbp_ohttp_request_decryption": False,
+    }
+
+
+def _local_tee_status_has_info_proof(value: dict[str, Any]) -> bool:
+    attestation_evidence_digest = value.get("attestation_evidence_digest")
+    hpke_key_config_digest = value.get("hpke_key_config_digest")
+    hpke_public_key_digest = value.get("hpke_public_key_digest")
+    if not (
+        is_full_sha256_digest(attestation_evidence_digest)
+        and is_full_sha256_digest(hpke_key_config_digest)
+        and is_full_sha256_digest(hpke_public_key_digest)
+    ):
+        return False
+
+    local_verification = value.get("local_verification")
+    if not isinstance(local_verification, dict):
+        return False
+    if local_verification.get("verified") is not True:
+        return False
+    verified_at = local_verification.get("verified_at")
+    expires_at = local_verification.get("expires_at")
+    if (
+        not isinstance(verified_at, int)
+        or isinstance(verified_at, bool)
+        or not isinstance(expires_at, int)
+        or isinstance(expires_at, bool)
+        or verified_at > int(time.time())
+        or expires_at <= int(time.time())
+    ):
+        return False
+    if local_verification.get("evidence_digest") != attestation_evidence_digest:
+        return False
+    if not is_full_sha256_digest(local_verification.get("verified_claims_digest")):
+        return False
+
+    proof_claims = local_verification.get("proof_claims")
+    client_confidentiality = value.get("client_confidentiality")
+    if not isinstance(proof_claims, dict) or not isinstance(
+        client_confidentiality, dict
+    ):
+        return False
+    return (
+        proof_claims.get("hpke_key_config_digest") == hpke_key_config_digest
+        and proof_claims.get("hpke_public_key_digest") == hpke_public_key_digest
+        and proof_claims.get("public_key_digest")
+        == client_confidentiality.get("attested_tls_public_key_digest")
+    )
+
+
+def _safe_info_routstr_tee(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    public: dict[str, Any] = {
+        "required": value.get("required") is True,
+        "ready": value.get("ready") is True,
+    }
+    client_confidentiality = _safe_info_client_confidentiality(
+        value.get("client_confidentiality")
+    )
+    if client_confidentiality is not None:
+        public["client_confidentiality"] = client_confidentiality
+    elif public["ready"] is True:
+        public["ready"] = False
+    if public["ready"] is True and not _local_tee_status_has_info_proof(value):
+        public["ready"] = False
+    return public
+
+
+def _safe_info_confidentiality_summary(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    required = value.get("required") is True
+    routable = _safe_info_routable_with_full_attestation(
+        value.get("routable_with_full_attestation")
+    )
+    mode = value.get("mode")
+    summary: dict[str, Any] = {
+        "mode": mode if isinstance(mode, str) and mode.strip() else "disabled",
+        "required": required,
+        "end_to_end_ready": required
+        and value.get("end_to_end_ready") is True
+        and any(routable.values()),
+        "routable_with_full_attestation": routable,
+    }
+    routstr_tee = _safe_info_routstr_tee(value.get("routstr_tee"))
+    if routstr_tee is not None:
+        summary["routstr_tee"] = routstr_tee
+    if not isinstance(routstr_tee, dict) or routstr_tee.get("ready") is not True:
+        summary["end_to_end_ready"] = False
+        summary["routable_with_full_attestation"] = (
+            _empty_info_routable_with_full_attestation()
+        )
+    return summary
+
+
 @app.get("/v1/info")
 async def info() -> dict:
-    return {
+    response = {
         "name": global_settings.name,
         "description": global_settings.description,
         "version": __version__,
@@ -250,11 +392,54 @@ async def info() -> dict:
         "onion_url": global_settings.onion_url,
         "child_key_cost_msats": global_settings.child_key_cost,
     }
+    try:
+        from ..proxy import get_confidentiality_status
+
+        confidentiality = _safe_info_confidentiality_summary(
+            get_confidentiality_status()
+        )
+    except Exception:
+        confidentiality = None
+    if confidentiality is not None and (
+        confidentiality["required"] is True
+        or any(confidentiality["routable_with_full_attestation"].values())
+    ):
+        response["confidentiality"] = confidentiality
+    return response
 
 
 @app.get("/v1/providers")
 async def providers() -> RedirectResponse:
     return RedirectResponse("/v1/providers/")
+
+
+@app.get("/v1/confidentiality/status")
+async def confidentiality_status() -> dict:
+    from ..proxy import get_confidentiality_status
+
+    return get_confidentiality_status()
+
+
+@app.get("/.well-known/routstr-attestation")
+async def routstr_attestation_statement() -> dict:
+    return get_routstr_attestation_statement()
+
+
+@app.get("/v1/confidentiality/attestation")
+async def routstr_confidentiality_attestation_statement() -> dict:
+    return get_routstr_attestation_statement()
+
+
+@app.get("/.well-known/hpke-keys")
+async def routstr_hpke_keys() -> StarletteResponse:
+    try:
+        key_config = read_routstr_hpke_key_config()
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return StarletteResponse(
+        content=key_config,
+        media_type="application/ohttp-keys",
+    )
 
 
 UI_DIST_PATH = Path(__file__).parent.parent.parent / "ui_out"
@@ -275,9 +460,7 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     # Serve the App Router RSC payload for the home page.
     @app.get("/index.txt", include_in_schema=False)
     async def serve_root_rsc() -> FileResponse:
-        return FileResponse(
-            UI_DIST_PATH / "index.txt", media_type="text/x-component"
-        )
+        return FileResponse(UI_DIST_PATH / "index.txt", media_type="text/x-component")
 
     # Next.js is built with `trailingSlash: true`, so all UI page URLs end
     # with a slash (e.g. `/login/`). The proxy router catches `/{path:path}`

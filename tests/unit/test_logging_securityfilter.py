@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 import pytest
 
-from routstr.core.logging import SecurityFilter
+from routstr.core.logging import SecurityFilter, redact_sensitive_text
 
 
 @pytest.fixture
@@ -72,6 +72,137 @@ def test_redacts_nsec_key(filter_message: Callable[[str], str]) -> None:
     original = "Private key is nsec1a8d9f8s7d9f8a7s6d5f4a3s2d1f9a8s7d6f5a4s3d2f1a9s8d7f6a5s4d3f"
     expected = "Private key is [REDACTED]"
     assert filter_message(original) == expected
+
+
+def test_redacts_standalone_provider_api_key(
+    filter_message: Callable[[str], str],
+) -> None:
+    """Test that standalone provider-style API keys are redacted."""
+    original = "Verifier failed with upstream token sk-live-secretvalue"
+    expected = "Verifier failed with upstream token [REDACTED]"
+    assert filter_message(original) == expected
+
+
+def test_redact_sensitive_text_redacts_standalone_provider_api_key() -> None:
+    original = "Verifier failed with upstream token sk-live-secretvalue"
+    redacted = redact_sensitive_text(original)
+
+    assert redacted == "Verifier failed with upstream token [REDACTED]"
+    assert "sk-live-secretvalue" not in redacted
+
+
+def test_redacts_json_style_secret_fields(
+    filter_message: Callable[[str], str],
+) -> None:
+    """Test that quoted JSON-style secret keys are redacted."""
+    original = (
+        'Verifier failed with {"api_key":"sk-live-secretvalue",'
+        '"raw_prompt":"SECRET PROMPT"}'
+    )
+    redacted = filter_message(original)
+
+    assert "api_key: [REDACTED]" in redacted
+    assert "raw_prompt: [REDACTED]" in redacted
+    assert "sk-live-secretvalue" not in redacted
+    assert "SECRET PROMPT" not in redacted
+
+
+def test_redact_sensitive_text_redacts_json_style_secret_fields() -> None:
+    original = (
+        'Verifier failed with {"api_key":"sk-live-secretvalue",'
+        '"raw_prompt":"SECRET PROMPT"}'
+    )
+    redacted = redact_sensitive_text(original)
+
+    assert "api_key: [REDACTED]" in redacted
+    assert "raw_prompt: [REDACTED]" in redacted
+    assert "sk-live-secretvalue" not in redacted
+    assert "SECRET PROMPT" not in redacted
+
+
+def test_security_filter_redacts_url_userinfo(
+    filter_message: Callable[[str], str],
+) -> None:
+    original = "Verifier failed at https://user:pass@verified.example/v1"
+    redacted = filter_message(original)
+
+    assert redacted == "Verifier failed at https://verified.example/v1"
+    assert "user:pass" not in redacted
+
+
+def test_security_filter_redacts_structured_extra_fields(
+    security_filter: SecurityFilter,
+) -> None:
+    record = logging.LogRecord(
+        name="test_logger",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg="Provider refresh failed",
+        args=(),
+        exc_info=None,
+    )
+    record.error = (
+        'verifier failed api_key=SECRET_PROVIDER_KEY '
+        '"raw_prompt":"SECRET PROMPT" https://user:pass@verified.example/v1'
+    )
+    record.api_key = "SECRET_PROVIDER_KEY"
+    record.context = {
+        "Authorization": "Bearer sk-live-secretvalue",
+        "raw_prompt": "SECRET PROMPT",
+        "url": "https://user:pass@verified.example/v1",
+    }
+
+    security_filter.filter(record)
+
+    assert "SECRET_PROVIDER_KEY" not in record.error
+    assert "SECRET PROMPT" not in record.error
+    assert "user:pass" not in record.error
+    assert "api_key: [REDACTED]" in record.error
+    assert "raw_prompt: [REDACTED]" in record.error
+    assert "https://verified.example/v1" in record.error
+    assert record.api_key == "[REDACTED]"
+    assert record.context["Authorization"] == "[REDACTED]"
+    assert record.context["raw_prompt"] == "[REDACTED]"
+    assert record.context["url"] == "https://verified.example/v1"
+
+
+def test_redacts_camel_case_secret_keys(
+    security_filter: SecurityFilter,
+) -> None:
+    original = (
+        'Verifier failed with {"apiKey":"SECRET_API_KEY",'
+        '"clientSecret":"SECRET CLIENT","rawPrompt":"SECRET PROMPT"}'
+    )
+    redacted = redact_sensitive_text(original)
+
+    assert "apikey: [REDACTED]" in redacted
+    assert "clientsecret: [REDACTED]" in redacted
+    assert "rawprompt: [REDACTED]" in redacted
+    assert "SECRET_API_KEY" not in redacted
+    assert "SECRET CLIENT" not in redacted
+    assert "SECRET PROMPT" not in redacted
+
+    record = logging.LogRecord(
+        name="test_logger",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg="Provider refresh failed",
+        args=(),
+        exc_info=None,
+    )
+    record.context = {
+        "apiKey": "SECRET_API_KEY",
+        "clientSecret": "SECRET CLIENT",
+        "rawPrompt": "SECRET PROMPT",
+    }
+
+    security_filter.filter(record)
+
+    assert record.context["apiKey"] == "[REDACTED]"
+    assert record.context["clientSecret"] == "[REDACTED]"
+    assert record.context["rawPrompt"] == "[REDACTED]"
 
 
 def test_ignores_non_sensitive_message(filter_message: Callable[[str], str]) -> None:

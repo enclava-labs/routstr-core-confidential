@@ -12,6 +12,7 @@ from sqlmodel import col, select, update
 
 from .core import db, get_logger
 from .core.db import store_cashu_transaction
+from .core.logging import credential_fingerprint
 from .core.settings import settings
 from .payment.lnurl import raw_send_to_lnurl
 
@@ -385,7 +386,7 @@ async def credit_balance(
 ) -> int:
     logger.info(
         "credit_balance: Starting token redemption",
-        extra={"token_preview": cashu_token[:50]},
+        extra={"token_fingerprint": credential_fingerprint(cashu_token)},
     )
 
     try:

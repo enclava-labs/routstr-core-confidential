@@ -20,7 +20,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
 
     provider_type = "generic"
     default_base_url = "http://localhost:8888"
-    platform_url = None
+    platform_url: str | None = None
 
     def __init__(
         self,

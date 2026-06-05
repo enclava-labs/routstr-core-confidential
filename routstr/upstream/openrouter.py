@@ -2,7 +2,11 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from ..payment.models import Model, async_fetch_openrouter_models
+from ..payment.models import (
+    Model,
+    async_fetch_openrouter_models,
+    remote_model_without_public_proof,
+)
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
@@ -52,7 +56,11 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
     async def fetch_models(self) -> list[Model]:
         """Fetch all OpenRouter models."""
         models_data = await async_fetch_openrouter_models()
-        models = [Model(**model) for model in models_data]  # type: ignore
+        models = [
+            Model(**model)
+            for item in models_data
+            if (model := remote_model_without_public_proof(item)) is not None
+        ]
         # manual alias for openai/text-embedding-ada-002 due to openrouter api bug
         for model in models:
             if model.id == "openai/text-embedding-ada-002":

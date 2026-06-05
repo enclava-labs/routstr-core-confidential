@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ..core import get_logger
-from ..payment.models import Model
+from ..payment.models import Model, remote_model_without_public_proof
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
@@ -50,8 +50,7 @@ class RoutstrUpstreamProvider(BaseUpstreamProvider):
     def normalize_request_path(
         self, path: str, model_obj: "Model | None" = None
     ) -> str:
-        """Preserve the ``v1/`` prefix when forwarding to an upstream Routstr.
-        """
+        """Preserve the ``v1/`` prefix when forwarding to an upstream Routstr."""
         return path.lstrip("/")
 
     @classmethod
@@ -150,7 +149,12 @@ class RoutstrUpstreamProvider(BaseUpstreamProvider):
                 response.raise_for_status()
                 data = response.json()
                 models = data.get("data", [])
-                return [Model(**m) for m in models]
+                safe_models = [
+                    model
+                    for item in models
+                    if (model := remote_model_without_public_proof(item)) is not None
+                ]
+                return [Model(**m) for m in safe_models]
             except Exception as e:
                 logger.error(
                     "Failed to fetch models from upstream Routstr",

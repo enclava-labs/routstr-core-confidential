@@ -1,0 +1,25 @@
+{
+  "base_url": "https://inference.tinfoil.sh/v1",
+  "confidentiality": {
+    "enabled": true,
+    "mode": "tinfoil",
+    "model_ids": [
+      "tinfoil/kimi-k2-6"
+    ],
+    "policy": {
+      "transport_security": "ehbp",
+      "repo": "tinfoilsh/confidential-model-router",
+      "expected_release_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "require_model_attestations": true,
+      "model_attestation_targets": {
+        "tinfoil/kimi-k2-6": {
+          "attestation_url": "https://kimi-k2-6.inf13.tinfoil.sh/.well-known/tinfoil-attestation",
+          "repo": "tinfoilsh/confidential-kimi-k2-6-b200",
+          "expected_release_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      },
+      "verifier_command": "build/confidential-verifiers/routstr-tinfoil-go-verifier",
+      "verifier_command_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  }
+}

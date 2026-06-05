@@ -3,12 +3,21 @@ Integration tests for general information endpoints that don't require authentic
 Tests GET /, GET /v1/models, and GET /admin/ endpoints.
 """
 
+import hashlib
+import time
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
 
+from routstr.core.admin import admin_sessions
+from routstr.core.settings import settings
+
 from .utils import PerformanceValidator
+
+
+def _digest(label: str) -> str:
+    return "sha256:" + hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
 @pytest.mark.integration
@@ -113,6 +122,206 @@ async def test_root_endpoint_environment_variables(
 
     # Version should be set
     assert len(data["version"]) > 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_info_endpoint_requires_local_tee_proof_for_end_to_end_ready(
+    integration_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_confidentiality_status() -> dict[str, object]:
+        return {
+            "mode": "required",
+            "required": True,
+            "end_to_end_ready": True,
+            "routable_with_full_attestation": {
+                "tinfoil": ["gpt-secure"],
+                "ppq-private": [],
+                "privatemode": [],
+            },
+            "routstr_tee": {
+                "required": True,
+                "ready": True,
+                "client_confidentiality": {
+                    "mode": "attested-tls-termination",
+                    "tls_terminates_in_attested_tee": True,
+                    "inbound_ehbp_ohttp_request_decryption": False,
+                },
+            },
+        }
+
+    monkeypatch.setattr(
+        "routstr.proxy.get_confidentiality_status",
+        fake_confidentiality_status,
+    )
+
+    response = await integration_client.get("/v1/info")
+
+    assert response.status_code == 200
+    confidentiality = response.json()["confidentiality"]
+    assert confidentiality["end_to_end_ready"] is False
+    assert confidentiality["routstr_tee"]["ready"] is False
+    assert confidentiality["routable_with_full_attestation"] == {
+        "tinfoil": [],
+        "ppq-private": [],
+        "privatemode": [],
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_info_endpoint_requires_local_tee_summary_for_exact_map(
+    integration_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_confidentiality_status() -> dict[str, object]:
+        return {
+            "mode": "required",
+            "required": True,
+            "end_to_end_ready": True,
+            "routable_with_full_attestation": {
+                "tinfoil": ["gpt-secure"],
+                "ppq-private": [],
+                "privatemode": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        "routstr.proxy.get_confidentiality_status",
+        fake_confidentiality_status,
+    )
+
+    response = await integration_client.get("/v1/info")
+
+    assert response.status_code == 200
+    confidentiality = response.json()["confidentiality"]
+    assert confidentiality["end_to_end_ready"] is False
+    assert "routstr_tee" not in confidentiality
+    assert confidentiality["routable_with_full_attestation"] == {
+        "tinfoil": [],
+        "ppq-private": [],
+        "privatemode": [],
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_info_endpoint_exposes_exact_confidential_routable_model_summary(
+    integration_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_confidentiality_status() -> dict[str, object]:
+        return {
+            "mode": "required",
+            "required": True,
+            "end_to_end_ready": True,
+            "routable_with_full_attestation": {
+                "tinfoil": ["gpt-secure"],
+                "ppq-private": [],
+                "privatemode": ["privatemode/gpt-oss-120b"],
+            },
+            "routstr_tee": {
+                "required": True,
+                "ready": True,
+                "attestation_evidence_digest": _digest("tee-evidence"),
+                "hpke_key_config_digest": _digest("hpke-key-config"),
+                "hpke_public_key_digest": _digest("hpke-public-key"),
+                "client_confidentiality": {
+                    "mode": "attested-tls-termination",
+                    "tls_terminates_in_attested_tee": True,
+                    "inbound_ehbp_ohttp_request_decryption": False,
+                    "attested_tls_public_key_digest": _digest("public-key"),
+                },
+                "local_verification": {
+                    "verified": True,
+                    "verified_at": 1_700_000_000,
+                    "expires_at": int(time.time()) + 300,
+                    "evidence_digest": _digest("tee-evidence"),
+                    "verified_claims_digest": _digest("routstr-tee-claims"),
+                    "proof_claims": {
+                        "hpke_key_config_digest": _digest("hpke-key-config"),
+                        "hpke_public_key_digest": _digest("hpke-public-key"),
+                        "public_key_digest": _digest("public-key"),
+                    },
+                },
+            },
+            "providers": [
+                {
+                    "provider_type": "tinfoil",
+                    "confidentiality": {
+                        "verified": True,
+                        "proof_claims": {"raw": "not-for-info-summary"},
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "routstr.proxy.get_confidentiality_status",
+        fake_confidentiality_status,
+    )
+
+    response = await integration_client.get("/v1/info")
+
+    assert response.status_code == 200
+    confidentiality = response.json()["confidentiality"]
+    assert confidentiality == {
+        "mode": "required",
+        "required": True,
+        "end_to_end_ready": True,
+        "routable_with_full_attestation": {
+            "tinfoil": ["gpt-secure"],
+            "ppq-private": [],
+            "privatemode": ["privatemode/gpt-oss-120b"],
+        },
+        "routstr_tee": {
+            "required": True,
+            "ready": True,
+            "client_confidentiality": {
+                "mode": "attested-tls-termination",
+                "tls_terminates_in_attested_tee": True,
+                "inbound_ehbp_ohttp_request_decryption": False,
+            },
+        },
+    }
+    assert "providers" not in confidentiality
+    assert "not-for-info-summary" not in response.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_info_endpoint_clears_malformed_confidential_routable_model_summary(
+    integration_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_confidentiality_status() -> dict[str, object]:
+        return {
+            "mode": "required",
+            "required": True,
+            "end_to_end_ready": True,
+            "routable_with_full_attestation": {
+                "tinfoil": ["gpt-secure", {"bad": "selector"}],
+                "ppq-private": ["private/gpt-oss-120b"],
+                "privatemode": "privatemode/gpt-oss-120b",
+            },
+        }
+
+    monkeypatch.setattr(
+        "routstr.proxy.get_confidentiality_status",
+        fake_confidentiality_status,
+    )
+
+    response = await integration_client.get("/v1/info")
+
+    assert response.status_code == 200
+    confidentiality = response.json()["confidentiality"]
+    assert confidentiality["end_to_end_ready"] is False
+    assert confidentiality["routable_with_full_attestation"] == {
+        "tinfoil": [],
+        "ppq-private": [],
+        "privatemode": [],
+    }
 
 
 @pytest.mark.integration
@@ -275,6 +484,53 @@ async def test_admin_endpoint_unauthenticated(
     assert len(diff["api_keys"]["added"]) == 0
     assert len(diff["api_keys"]["removed"]) == 0
     assert len(diff["api_keys"]["modified"]) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_settings_redacts_local_tee_verifier_material(
+    integration_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_token = "admin-tee-settings-redaction"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    verifier_policy = '{"measurement":"secret-local-policy"}'
+    verifier_command = "/opt/routstr/bin/verify-tee --token sk-local-secret"
+    attestation_command = "/opt/routstr/bin/attest-tee --nonce local-secret"
+    hpke_key_config = "local-hpke-key-config"
+    attestation_public_key = "local-attestation-public-key"
+    monkeypatch.setattr(settings, "routstr_tee_verifier_policy_json", verifier_policy)
+    monkeypatch.setattr(settings, "routstr_tee_verifier_command", verifier_command)
+    monkeypatch.setattr(
+        settings, "routstr_tee_attestation_command", attestation_command
+    )
+    monkeypatch.setattr(
+        settings, "routstr_attestation_hpke_key_config_b64", hpke_key_config
+    )
+    monkeypatch.setattr(
+        settings, "routstr_attestation_public_key", attestation_public_key
+    )
+
+    try:
+        response = await integration_client.get("/admin/api/settings")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["routstr_tee_verifier_policy_json"] == "[REDACTED]"
+        assert data["routstr_tee_verifier_command"] == "[REDACTED]"
+        assert data["routstr_tee_attestation_command"] == "[REDACTED]"
+        assert data["routstr_attestation_hpke_key_config_b64"] == "[REDACTED]"
+        assert data["routstr_attestation_public_key"] == "[REDACTED]"
+        assert verifier_policy not in response.text
+        assert verifier_command not in response.text
+        assert attestation_command not in response.text
+        assert hpke_key_config not in response.text
+        assert attestation_public_key not in response.text
+
+    finally:
+        admin_sessions.pop(admin_token, None)
+        integration_client.headers.pop("Authorization", None)
 
 
 @pytest.mark.integration

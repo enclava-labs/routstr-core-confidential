@@ -32,6 +32,7 @@ from ..core.exceptions import UpstreamError
 from ..payment.models import Model
 
 logger = get_logger(__name__)
+CONFIDENTIAL_REDACTION_TEXT = "<redacted: confidential route>"
 
 # Anthropic-Messages-only fields that don't translate to OpenAI
 # Chat Completions. ``litellm.drop_params`` only filters *known*
@@ -505,30 +506,33 @@ async def dispatch_anthropic_messages(
     try:
         result = await litellm.anthropic.messages.acreate(**kwargs)
     except Exception as exc:
+        confidential = bool((log_extra or {}).get("confidential"))
         exc_message = getattr(exc, "message", None) or str(exc) or repr(exc)
         exc_status = getattr(exc, "status_code", None)
         exc_response = getattr(exc, "response", None)
         response_text = None
-        if exc_response is not None:
+        if exc_response is not None and not confidential:
             try:
                 response_text = getattr(exc_response, "text", str(exc_response))
             except Exception:
                 response_text = "<unreadable>"
+        safe_exc_message = CONFIDENTIAL_REDACTION_TEXT if confidential else exc_message
         logger.error(
             "litellm dispatch failed",
             extra={
-                "error": exc_message,
+                "error": safe_exc_message,
                 "error_type": type(exc).__name__,
                 "status_code": exc_status,
                 "llm_provider": getattr(exc, "llm_provider", None),
-                "body": getattr(exc, "body", None),
+                "body": None if confidential else getattr(exc, "body", None),
                 "response_text": response_text,
                 "model": litellm_model,
                 "api_base": base_url,
+                "confidential": confidential,
             },
         )
         raise UpstreamError(
-            f"Upstream error via litellm: {exc_message}",
+            f"Upstream error via litellm: {safe_exc_message}",
             status_code=exc_status if isinstance(exc_status, int) else 502,
         ) from exc
 

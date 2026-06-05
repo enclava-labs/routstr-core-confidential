@@ -18,6 +18,7 @@ os.environ.setdefault("UPSTREAM_BASE_URL", "http://test")
 os.environ.setdefault("UPSTREAM_API_KEY", "test")
 
 from routstr.core.db import ApiKey  # noqa: E402
+from routstr.core.exceptions import UpstreamError  # noqa: E402
 from routstr.payment.cost_calculation import CostData  # noqa: E402
 from routstr.payment.models import Architecture, Model, Pricing  # noqa: E402
 from routstr.upstream.base import BaseUpstreamProvider  # noqa: E402
@@ -1311,3 +1312,33 @@ async def test_dispatch_uses_url_detected_prefix_for_fireworks_custom_row() -> N
         "fireworks_ai/accounts/fireworks/models/glm-5"
     )
     assert captured_kwargs["api_base"] == "https://api.fireworks.ai/inference/v1"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_redacts_litellm_error_for_confidential_route() -> None:
+    provider = _make_provider()
+    model = _make_model()
+    body = _anthropic_request_body(stream=True)
+
+    class FakeResponse:
+        text = "upstream body leaked SECRET_PROMPT"
+
+    class FakeLitellmError(Exception):
+        status_code = 500
+        response = FakeResponse()
+        body = {"prompt": "SECRET_PROMPT"}
+        message = "provider error included SECRET_PROMPT"
+
+    with patch(
+        "litellm.anthropic.messages.acreate",
+        new=AsyncMock(side_effect=FakeLitellmError()),
+    ):
+        with pytest.raises(UpstreamError) as exc_info:
+            await provider._dispatch_anthropic_messages(
+                request_body=body,
+                model_obj=model,
+                log_extra={"confidential": True},
+            )
+
+    assert "SECRET_PROMPT" not in str(exc_info.value)
+    assert "redacted" in str(exc_info.value)

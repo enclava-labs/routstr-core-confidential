@@ -1,0 +1,27 @@
+# Required-mode routing: refuse plaintext or unverified provider routes.
+CONFIDENTIAL_ROUTING_MODE=required
+
+# Current client-to-Routstr confidentiality boundary. Routstr parses ordinary
+# OpenAI-compatible HTTP bodies, so production confidentiality requires TLS
+# termination inside the attested Routstr TEE.
+ROUTSTR_TEE_CLIENT_CONFIDENTIALITY_BOUNDARY=attested-tls-termination
+
+# One of: tdx_quote, tdx_quote_v4, sev_snp_report.
+ROUTSTR_TEE_ATTESTATION_DOCUMENT_FORMAT=sev_snp_report
+
+# Built by `make confidential-preflight`.
+ROUTSTR_TEE_VERIFIER_COMMAND=build/confidential-verifiers/routstr-tee-go-verifier
+ROUTSTR_TEE_VERIFIER_COMMAND_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ROUTSTR_TEE_ATTESTATION_COMMAND=build/confidential-verifiers/routstr-tee-attest-go
+ROUTSTR_TEE_ATTESTATION_COMMAND_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+# Set one public-key source and one HPKE key-config source.
+ROUTSTR_TEE_PUBLIC_KEY_PATH=/run/routstr/tls/public-key.pem
+ROUTSTR_TEE_HPKE_KEY_CONFIG_PATH=/run/routstr/hpke/ohttp-keys.bin
+
+# The attested TLS public key must match ROUTSTR_TEE_PUBLIC_KEY_PATH.
+ROUTSTR_TEE_ATTESTED_TLS_PUBLIC_KEY_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+# Pin the production Routstr code measurement. Do not put API keys or bearer
+# tokens in this JSON; preflight rejects inline secrets.
+ROUTSTR_TEE_VERIFIER_POLICY_JSON={"expected_routstr_code_measurement":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
