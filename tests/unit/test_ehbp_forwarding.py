@@ -2188,7 +2188,6 @@ async def test_tinfoil_x_cashu_chat_request_uses_verified_ehbp_transport(
             max_cost_for_model=10_000,
             model_obj=_model(),
             mint=None,
-            payment_token_hash="hash",
         )
 
     assert response.status_code == 200
@@ -2265,7 +2264,6 @@ async def test_tinfoil_x_cashu_responses_request_uses_verified_ehbp_transport(
             max_cost_for_model=10_000,
             model_obj=_model(),
             mint=None,
-            payment_token_hash="hash",
         )
 
     assert response.status_code == 200
@@ -2701,7 +2699,6 @@ async def test_ppq_private_x_cashu_request_rejects_unsupported_embeddings_before
             max_cost_for_model=10_000,
             model_obj=_ppq_private_model(),
             mint=None,
-            payment_token_hash="hash",
         )
 
     assert "does not support the Embeddings API" in str(exc_info.value)
@@ -2734,7 +2731,6 @@ async def test_ppq_private_x_cashu_responses_rejects_unsupported_endpoint_before
             max_cost_for_model=10_000,
             model_obj=_ppq_private_model(),
             mint=None,
-            payment_token_hash="hash",
         )
 
     assert "does not support the Responses API" in str(exc_info.value)
