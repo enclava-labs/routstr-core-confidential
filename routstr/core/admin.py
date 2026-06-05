@@ -30,7 +30,7 @@ from .db import (
     create_session,
 )
 from .log_manager import log_manager
-from .logging import get_logger
+from .logging import get_logger, redact_sensitive_text
 from .policy_secrets import inline_policy_secret_violations
 from .settings import SettingsService, settings
 
@@ -219,6 +219,58 @@ async def get_balances_api(request: Request) -> list[dict[str, object]]:
 @admin_router.get("/api/settings", dependencies=[Depends(require_admin_api)])
 async def get_settings(request: Request) -> dict:
     return _redact_settings_response(settings.dict())
+
+
+def _admin_confidentiality_status(status: object) -> dict[str, object]:
+    if hasattr(status, "dict"):
+        data = status.dict()  # type: ignore[no-untyped-call]
+    elif isinstance(status, Mapping):
+        data = dict(status)
+    else:
+        data = {}
+
+    verified_claims = data.pop("verified_claims", None)
+    if isinstance(verified_claims, Mapping):
+        data["verified_claims_present"] = bool(verified_claims)
+        data["verified_claims_keys"] = sorted(
+            key for key in verified_claims if isinstance(key, str)
+        )
+    else:
+        data["verified_claims_present"] = False
+        data["verified_claims_keys"] = []
+
+    failure_reason = data.get("failure_reason")
+    if isinstance(failure_reason, str) and failure_reason.strip():
+        data["failure_reason"] = str(redact_sensitive_text(failure_reason))
+    return data
+
+
+@admin_router.get(
+    "/api/confidentiality/status", dependencies=[Depends(require_admin_api)]
+)
+async def get_admin_confidentiality_status() -> dict[str, object]:
+    from ..proxy import confidential_routing_required, get_upstreams
+
+    providers: list[dict[str, object]] = []
+    for upstream in get_upstreams():
+        providers.append(
+            {
+                "provider_type": upstream.provider_type,
+                "upstream_name": upstream.upstream_name,
+                "base_url": upstream.base_url,
+                "db_id": getattr(upstream, "db_id", None),
+                "confidentiality": _admin_confidentiality_status(
+                    upstream.confidentiality_status()
+                ),
+            }
+        )
+
+    mode = str(getattr(settings, "confidential_routing_mode", "disabled") or "")
+    return {
+        "mode": mode.strip().lower() or "disabled",
+        "required": confidential_routing_required(),
+        "providers": providers,
+    }
 
 
 class SettingsUpdate(RootModel[dict[str, object]]):

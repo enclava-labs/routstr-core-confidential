@@ -3828,6 +3828,62 @@ async def test_confidentiality_status_endpoint_omits_raw_failure_reason(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_admin_confidentiality_status_exposes_redacted_failure_reason(
+    integration_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://verified.example/v1",
+        api_key="test",
+    )
+    provider.provider_type = "tinfoil"
+    provider.upstream_name = "tinfoil-prod"
+    provider.set_confidentiality_status(
+        ConfidentialityStatus(
+            enabled=True,
+            verified=False,
+            mode="tinfoil",
+            failure_reason=(
+                "verifier failed with api_key=SECRET_PROVIDER_KEY "
+                "and raw_prompt=SECRET_PROMPT"
+            ),
+            policy_digest=VALID_POLICY_DIGEST,
+            verified_claims={"release_digest": VALID_PROVIDER_RELEASE_DIGEST},
+        )
+    )
+
+    monkeypatch.setattr(settings, "confidential_routing_mode", "required")
+    admin_token = "test-admin-confidentiality-diagnostics"
+    admin_sessions[admin_token] = 4_102_444_800
+
+    try:
+        with patch("routstr.proxy._upstreams", [provider]):
+            response = await integration_client.get(
+                "/admin/api/confidentiality/status",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+    finally:
+        admin_sessions.pop(admin_token, None)
+
+    assert response.status_code == 200
+    data = response.json()
+    confidentiality = data["providers"][0]["confidentiality"]
+    assert confidentiality["failure_reason"] == (
+        "verifier failed with api_key: [REDACTED] "
+        "and raw_prompt: [REDACTED]"
+    )
+    assert confidentiality["policy_digest"] == VALID_POLICY_DIGEST
+    assert confidentiality["verified_claims_present"] is True
+    assert confidentiality["verified_claims_keys"] == ["release_digest"]
+    assert "verified_claims" not in confidentiality
+
+    serialized = json.dumps(data)
+    assert "SECRET_PROVIDER_KEY" not in serialized
+    assert "SECRET_PROMPT" not in serialized
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_models_endpoint_exposes_public_confidentiality_metadata(
     integration_client: AsyncClient,
     tmp_path: Path,
