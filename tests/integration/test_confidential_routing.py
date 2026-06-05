@@ -4103,10 +4103,7 @@ async def test_models_endpoint_does_not_mark_unroutable_confidential_model_verif
         response = await integration_client.get("/v1/models")
 
     assert response.status_code == 200
-    model = response.json()["data"][0]
-    assert model["confidential"] is False
-    assert model["provider_attestation_status"] == "verified"
-    assert model["attestation_status"] == "unavailable"
+    assert response.json()["data"] == []
 
 
 @pytest.mark.integration
@@ -4174,11 +4171,7 @@ async def test_models_endpoint_marks_confidential_unavailable_without_routstr_te
     data = response.json()
     assert data["routstr_tee"]["required"] is True
     assert data["routstr_tee"]["ready"] is False
-    model = data["data"][0]
-    assert model["confidential"] is False
-    assert model["attestation_status"] == "unavailable"
-    assert model["provider_attestation_status"] == "verified"
-    assert model["confidentiality"]["verified"] is True
+    assert data["data"] == []
 
 
 @pytest.mark.integration
@@ -4256,10 +4249,7 @@ async def test_models_endpoint_requires_local_tee_proof_before_confidential_true
     assert response.status_code == 200
     data = response.json()
     assert data["routstr_tee"]["ready"] is False
-    model = data["data"][0]
-    assert model["confidential"] is False
-    assert model["provider_attestation_status"] == "verified"
-    assert model["attestation_status"] == "unavailable"
+    assert data["data"] == []
 
 
 @pytest.mark.integration
@@ -4315,7 +4305,14 @@ async def test_models_endpoint_redacts_raw_confidentiality_diagnostics(
         },
     )
 
-    with patch("routstr.proxy._unique_models", {"tinfoil/gpt-secure": secure_model}):
+    with (
+        patch("routstr.proxy._unique_models", {"tinfoil/gpt-secure": secure_model}),
+        patch(
+            "routstr.proxy.is_routable_confidential_model",
+            return_value=True,
+            create=True,
+        ),
+    ):
         response = await integration_client.get("/v1/models")
 
     assert response.status_code == 200
@@ -4339,6 +4336,76 @@ async def test_models_endpoint_redacts_raw_confidentiality_diagnostics(
     assert "SECRET_PROMPT" not in serialized
     assert "SECRET_KEY_CONFIG" not in serialized
     assert "SECRET_STEP" not in serialized
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_models_endpoint_accepts_tinfoil_prefixed_selector_for_bare_catalog_model(
+    integration_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tinfoil publishes bare catalog IDs while verified policy selectors are prefixed."""
+    monkeypatch.setattr(
+        "routstr.core.attestation.get_public_routstr_tee_status",
+        lambda: {"required": False, "ready": False},
+    )
+    provider_claims = _public_tinfoil_proof_claims(["tinfoil/kimi-k2-6"])
+    provider_policy = {
+        **_tinfoil_policy_for_model_ids(["tinfoil/kimi-k2-6"]),
+        "expected_release_digest": _digest("public-tinfoil-router-release"),
+    }
+    secure_model = Model(
+        id="kimi-k2-6",
+        name="Secure Model",
+        created=1,
+        description="desc",
+        context_length=8192,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="gpt",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.001, completion=0.002),
+        confidentiality={
+            "enabled": True,
+            "verified": True,
+            "attestation_status": "verified",
+            "mode": "tinfoil",
+            "provider_type": "tinfoil",
+            "verifier": "unit-test-verifier",
+            "policy_digest": VALID_POLICY_DIGEST,
+            "evidence_digest": VALID_EVIDENCE_DIGEST,
+            "verified_at": 1_700_000_000,
+            "expires_at": 1_800_000_000,
+            "model_ids": ["tinfoil/kimi-k2-6"],
+            "model_id_prefixes": [],
+            "supported_endpoints": ["/v1/chat/completions"],
+            "metadata_leakage": ["model"],
+            "verified_claims": provider_claims,
+            "proof_claims": provider_claims,
+            "confidentiality_policy": provider_policy,
+        },
+    )
+
+    with (
+        patch("routstr.proxy._unique_models", {"kimi-k2-6": secure_model}),
+        patch(
+            "routstr.proxy.is_routable_confidential_model",
+            return_value=True,
+            create=True,
+        ),
+    ):
+        response = await integration_client.get("/v1/models")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["data"]) == 1
+    model = data["data"][0]
+    assert model["id"] == "kimi-k2-6"
+    assert model["confidential"] is True
+    assert model["confidentiality"]["model_ids"] == ["tinfoil/kimi-k2-6"]
 
 
 @pytest.mark.integration
@@ -4414,11 +4481,7 @@ async def test_models_endpoint_drops_verified_confidentiality_for_unbound_model_
         response = await integration_client.get("/v1/models")
 
     assert response.status_code == 200
-    model = response.json()["data"][0]
-    assert model["id"] == "tinfoil/other-model"
-    assert "confidentiality" not in model
-    assert model.get("confidential") is not True
-    assert model.get("provider_attestation_status") != "verified"
+    assert response.json()["data"] == []
 
 
 @pytest.mark.integration
@@ -4468,7 +4531,7 @@ async def test_models_endpoint_drops_verified_confidentiality_with_malformed_pub
 
     assert response.status_code == 200
     data = response.json()
-    assert "confidentiality" not in data["data"][0]
+    assert data["data"] == []
     serialized = json.dumps(data)
     assert "SECRET_MODEL_SELECTOR" not in serialized
 
@@ -4517,8 +4580,7 @@ async def test_models_endpoint_drops_conflicting_nested_attestation_status(
 
     assert response.status_code == 200
     data = response.json()
-    assert "confidentiality" not in data["data"][0]
-    assert data["data"][0].get("confidential") is not True
+    assert data["data"] == []
 
 
 @pytest.mark.integration

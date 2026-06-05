@@ -954,6 +954,41 @@ def test_confidential_routing_accepts_tinfoil_runtime_evidence_digest() -> None:
     assert unique_models[model_id].confidentiality["verified"] is True
 
 
+def test_tinfoil_prefixed_policy_covers_bare_catalog_model() -> None:
+    """Tinfoil's catalog returns bare IDs while verifier policy uses tinfoil/* IDs."""
+    verified_model_id = "tinfoil/kimi-k2-6"
+    catalog_model = create_test_model("kimi-k2-6")
+    provider = create_test_provider(
+        "tinfoil",
+        "https://inference.tinfoil.sh/v1",
+        db_id=1,
+        upstream_name="tinfoil",
+        models=[catalog_model],
+        confidentiality_status=create_confidential_status(
+            mode="tinfoil",
+            model_ids=[verified_model_id],
+            verified_claims=tinfoil_claims_for_model_ids([verified_model_id]),
+        ),
+    )
+    configure_tinfoil_model_attestation_policy(provider, [verified_model_id])
+    provider._db_confidential_attestations = {
+        (verified_model_id, "tinfoil"): create_db_attestation_row(
+            model_id=verified_model_id,
+        )
+    }
+
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_id={},
+        disabled_model_ids=set(),
+        require_confidential=False,
+    )
+
+    assert provider_map["kimi-k2-6"] == [provider]
+    assert unique_models["kimi-k2-6"].confidentiality is not None
+    assert unique_models["kimi-k2-6"].confidentiality["verified"] is True
+
+
 def test_confidential_routing_rejects_known_provider_without_local_policy() -> None:
     """Verified-looking status is not enough without a local pinned verifier policy."""
     model = create_test_model("gpt-secure")

@@ -14,6 +14,7 @@ from .core.confidentiality_public import (
     is_full_sha256_digest,
     provider_evidence_digest_matches_status,
     public_confidentiality_policy_binds_provider_proof,
+    public_model_id_matches_verified_selector,
     public_provider_proof_claims_cover_model_selectors,
     verified_public_provider_proof_claims,
 )
@@ -350,6 +351,31 @@ def _selector_covers_identifier(
 ) -> bool:
     return identifier in model_ids or any(
         identifier.startswith(prefix) for prefix in model_id_prefixes
+    )
+
+
+def _tinfoil_selector_covers_bare_catalog_model(
+    status: Any,
+    model: "Model",
+    alias: str | None,
+    model_ids: list[str],
+) -> bool:
+    status_mode = _lower_non_empty_string(getattr(status, "mode", None))
+    if status_mode != "tinfoil":
+        return False
+    route_alias = _lower_non_empty_string(alias)
+    model_id = _lower_non_empty_string(getattr(model, "id", None))
+    if not route_alias or "/" in route_alias or model_id != route_alias:
+        return False
+    forwarded_model_id = _lower_non_empty_string(
+        getattr(model, "forwarded_model_id", None)
+    )
+    if forwarded_model_id and forwarded_model_id != route_alias:
+        return False
+    return public_model_id_matches_verified_selector(
+        route_alias,
+        model_ids,
+        mode=status_mode,
     )
 
 
@@ -2058,6 +2084,8 @@ def _confidentiality_status_covers_model(
         _selector_covers_identifier(identifier, model_ids, model_id_prefixes)
         for identifier in identifiers
     ):
+        return True
+    if _tinfoil_selector_covers_bare_catalog_model(status, model, alias, model_ids):
         return True
     return False
 

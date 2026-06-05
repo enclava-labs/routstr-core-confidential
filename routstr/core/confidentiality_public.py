@@ -506,6 +506,40 @@ def _public_selected_model_set(model_ids: object) -> set[str] | None:
     return set(selected)
 
 
+def public_model_id_matches_verified_selector(
+    model_id: object,
+    model_ids: object,
+    *,
+    provider_type: object = None,
+    mode: object = None,
+) -> bool:
+    """Return whether a local model ID is covered by an exact verified selector."""
+    if not isinstance(model_id, str) or not model_id.strip():
+        return False
+    if not isinstance(model_ids, list) or not model_ids:
+        return False
+    normalized_model_id = model_id.strip().lower()
+    normalized_selectors: list[str] = []
+    for selector in model_ids:
+        if not isinstance(selector, str) or not selector.strip():
+            return False
+        normalized_selectors.append(selector.strip().lower())
+
+    if normalized_model_id in normalized_selectors:
+        return True
+    provider = provider_type.strip().lower() if isinstance(provider_type, str) else ""
+    normalized_mode = mode.strip().lower() if isinstance(mode, str) else ""
+    if provider != "tinfoil" and normalized_mode != "tinfoil":
+        return False
+    if "/" in normalized_model_id:
+        return False
+    return any(
+        selector.startswith("tinfoil/")
+        and selector.split("/", 1)[1] == normalized_model_id
+        for selector in normalized_selectors
+    )
+
+
 def _public_tinfoil_model_attestation_claims_match_target(
     target: dict[str, Any],
     claims: dict[str, Any],

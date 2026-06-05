@@ -16,6 +16,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from ..core.confidentiality_public import (
     is_full_sha256_digest,
     public_confidentiality_policy_binds_provider_proof,
+    public_model_id_matches_verified_selector,
     public_provider_proof_claims_cover_model_selectors,
     public_provider_type_satisfies_mode,
     public_verified_model_selectors_satisfy_provider,
@@ -360,11 +361,11 @@ def _public_model_confidentiality(
             public_model_ids = public.get("model_ids")
             if not isinstance(public_model_ids, list):
                 return None
-            normalized_model_id = model_id.strip().lower()
-            if not any(
-                isinstance(public_model_id, str)
-                and public_model_id.strip().lower() == normalized_model_id
-                for public_model_id in public_model_ids
+            if not public_model_id_matches_verified_selector(
+                model_id,
+                public_model_ids,
+                provider_type=public.get("provider_type"),
+                mode=public.get("mode"),
             ):
                 return None
         now = int(time.time())
