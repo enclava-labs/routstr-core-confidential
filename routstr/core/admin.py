@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, Field, RootModel
 from pydantic.v1 import ValidationError as PydanticValidationError
 from sqlmodel import select
 
@@ -174,10 +174,67 @@ async def get_temporary_balances_api(
     }
 
 
+class ApiKeyCreate(BaseModel):
+    balance_msats: int = Field(gt=0)
+    refund_address: str | None = None
+    refund_mint_url: str | None = None
+    refund_currency: str | None = None
+    key_expiry_time: int | None = None
+    balance_limit: int | None = None
+    balance_limit_reset: str | None = None
+    validity_date: int | None = None
+
+
 class ApiKeyUpdate(BaseModel):
     balance_limit: int | None = None
     balance_limit_reset: str | None = None
     validity_date: int | None = None
+
+
+@admin_router.post("/api/apikeys", dependencies=[Depends(require_admin_api)])
+async def create_apikey(payload: ApiKeyCreate) -> dict[str, object]:
+    raw_key = ""
+    async with create_session() as session:
+        for _ in range(10):
+            raw_key = secrets.token_urlsafe(32)
+            if not await session.get(ApiKey, raw_key):
+                break
+        else:
+            raise HTTPException(status_code=500, detail="Failed to generate API key")
+
+        key = ApiKey(
+            hashed_key=raw_key,
+            balance=payload.balance_msats,
+            refund_address=payload.refund_address,
+            refund_mint_url=payload.refund_mint_url,
+            refund_currency=payload.refund_currency,
+            key_expiry_time=payload.key_expiry_time,
+            balance_limit=payload.balance_limit,
+            balance_limit_reset=payload.balance_limit_reset,
+            balance_limit_reset_date=int(datetime.now(timezone.utc).timestamp())
+            if payload.balance_limit_reset
+            else None,
+            validity_date=payload.validity_date,
+        )
+        session.add(key)
+        await session.commit()
+        await session.refresh(key)
+
+    return {
+        "api_key": "sk-" + key.hashed_key,
+        "hashed_key": key.hashed_key,
+        "balance": key.balance,
+        "reserved_balance": key.reserved_balance,
+        "total_spent": key.total_spent,
+        "total_requests": key.total_requests,
+        "refund_address": key.refund_address,
+        "refund_mint_url": key.refund_mint_url,
+        "refund_currency": key.refund_currency,
+        "key_expiry_time": key.key_expiry_time,
+        "balance_limit": key.balance_limit,
+        "balance_limit_reset": key.balance_limit_reset,
+        "validity_date": key.validity_date,
+    }
 
 
 @admin_router.patch(
