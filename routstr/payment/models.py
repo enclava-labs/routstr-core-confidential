@@ -911,7 +911,7 @@ async def test_model(
 @models_router.get("/models")
 @models_router.get("/models/", include_in_schema=False)
 async def models(session: AsyncSession = Depends(get_session)) -> dict:
-    """Get all available models from all providers with database overrides applied."""
+    """Get verified TEE-routable models with database overrides applied."""
     from ..proxy import (
         _safe_public_routstr_tee_status,
         get_unique_models,
@@ -934,38 +934,39 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
             m.get("confidentiality"),
             model_id=model_id,
         )
-        if confidentiality:
-            advertises_confidentiality = True
-            if routstr_tee_status is None:
-                from ..core.attestation import get_public_routstr_tee_status
+        if not confidentiality:
+            continue
 
-                routstr_tee_status = _safe_public_routstr_tee_status(
-                    get_public_routstr_tee_status()
-                ) or {"required": True, "ready": False}
-            provider_verified = confidentiality.get("verified") is True
-            local_tee_ready = (
-                routstr_tee_status.get("ready") is True
-                if routstr_tee_status.get("required") is True
-                else True
-            )
-            routeable = (
-                isinstance(model_id, str)
-                and bool(model_id.strip())
-                and is_routable_confidential_model(model_id, model)
-            )
-            verified = provider_verified and local_tee_ready and routeable
-            m["confidentiality"] = confidentiality
-            m["confidential"] = verified
-            m["attestation_provider"] = confidentiality.get(
-                "provider_type"
-            ) or confidentiality.get("mode")
-            m["provider_attestation_status"] = (
-                "verified" if provider_verified else "unavailable"
-            )
-            m["attestation_status"] = "verified" if verified else "unavailable"
-            m["attestation_evidence_digest"] = confidentiality.get("evidence_digest")
-        else:
-            m.pop("confidentiality", None)
+        advertises_confidentiality = True
+        if routstr_tee_status is None:
+            from ..core.attestation import get_public_routstr_tee_status
+
+            routstr_tee_status = _safe_public_routstr_tee_status(
+                get_public_routstr_tee_status()
+            ) or {"required": True, "ready": False}
+        provider_verified = confidentiality.get("verified") is True
+        local_tee_ready = (
+            routstr_tee_status.get("ready") is True
+            if routstr_tee_status.get("required") is True
+            else True
+        )
+        routeable = (
+            isinstance(model_id, str)
+            and bool(model_id.strip())
+            and is_routable_confidential_model(model_id, model)
+        )
+        verified = provider_verified and local_tee_ready and routeable
+        if not verified:
+            continue
+
+        m["confidentiality"] = confidentiality
+        m["confidential"] = True
+        m["attestation_provider"] = confidentiality.get(
+            "provider_type"
+        ) or confidentiality.get("mode")
+        m["provider_attestation_status"] = "verified"
+        m["attestation_status"] = "verified"
+        m["attestation_evidence_digest"] = confidentiality.get("evidence_digest")
         if model.forwarded_model_id:
             m["id"] = model.forwarded_model_id
         data.append(m)

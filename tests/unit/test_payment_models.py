@@ -1,7 +1,13 @@
+from typing import Any
+
 import pytest
 
+import routstr.core.attestation as attestation
+import routstr.payment.models as payment_models_module
+import routstr.proxy as proxy
 from routstr.core.db import ModelRow
 from routstr.payment.models import (
+    Model,
     _public_model_confidentiality,
     _row_to_model,
     remote_model_without_public_proof,
@@ -29,6 +35,36 @@ def _model_row(**updates: object) -> ModelRow:
     }
     data.update(updates)
     return ModelRow(**data)
+
+
+def _catalog_model(
+    model_id: str,
+    *,
+    confidentiality: dict[str, Any] | None = None,
+) -> Model:
+    return Model(
+        id=model_id,
+        name=model_id,
+        created=1,
+        description="test",
+        context_length=4096,
+        architecture={
+            "modality": "text->text",
+            "input_modalities": ["text"],
+            "output_modalities": ["text"],
+            "tokenizer": "gpt",
+            "instruct_type": None,
+        },
+        pricing={
+            "prompt": 0.0,
+            "completion": 0.0,
+            "request": 0.0,
+            "image": 0.0,
+            "web_search": 0.0,
+            "internal_reasoning": 0.0,
+        },
+        confidentiality=confidentiality,
+    )
 
 
 def test_row_to_model_rejects_non_standard_pricing_json() -> None:
@@ -65,6 +101,62 @@ def test_row_to_model_rejects_negative_pricing_values() -> None:
 
     with pytest.raises(ValueError, match="pricing values must be non-negative"):
         _row_to_model(row)
+
+
+@pytest.mark.asyncio
+async def test_models_endpoint_lists_only_routable_confidential_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plain_model = _catalog_model("gpt-public")
+    unrouted_confidential_model = _catalog_model(
+        "gpt-secure-cold",
+        confidentiality={"mode": "tinfoil"},
+    )
+    routed_confidential_model = _catalog_model(
+        "gpt-secure",
+        confidentiality={"mode": "tinfoil"},
+    )
+
+    def fake_public_model_confidentiality(
+        value: object,
+        *,
+        model_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if value == {"mode": "tinfoil"}:
+            return {
+                "verified": True,
+                "mode": "tinfoil",
+                "provider_type": "tinfoil",
+                "evidence_digest": "sha256:" + ("a" * 64),
+            }
+        return None
+
+    monkeypatch.setattr(
+        proxy,
+        "get_unique_models",
+        lambda: [plain_model, unrouted_confidential_model, routed_confidential_model],
+    )
+    monkeypatch.setattr(
+        proxy,
+        "is_routable_confidential_model",
+        lambda model_id, model: model_id == "gpt-secure",
+    )
+    monkeypatch.setattr(
+        attestation,
+        "get_public_routstr_tee_status",
+        lambda: {"required": False, "ready": False},
+    )
+    monkeypatch.setattr(
+        payment_models_module,
+        "_public_model_confidentiality",
+        fake_public_model_confidentiality,
+    )
+
+    response = await payment_models_module.models()
+
+    assert [model["id"] for model in response["data"]] == ["gpt-secure"]
+    assert response["data"][0]["confidential"] is True
+    assert response["data"][0]["attestation_status"] == "verified"
 
 
 def test_public_model_confidentiality_rejects_non_list_verified_selectors() -> None:
