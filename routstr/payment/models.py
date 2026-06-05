@@ -15,6 +15,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core.confidentiality_public import (
     is_full_sha256_digest,
+    provider_evidence_digest_matches_status,
     public_confidentiality_policy_binds_provider_proof,
     public_model_id_matches_verified_selector,
     public_provider_proof_claims_cover_model_selectors,
@@ -395,8 +396,10 @@ def _public_model_confidentiality(
         if proof_claims:
             if proof_claims.get("payload_policy_digest") != public.get("policy_digest"):
                 return None
-            if proof_claims.get("payload_evidence_digest") != public.get(
-                "evidence_digest"
+            if not provider_evidence_digest_matches_status(
+                public.get("evidence_digest"),
+                verified_claims,
+                proof_claims,
             ):
                 return None
             if not public_provider_proof_claims_cover_model_selectors(

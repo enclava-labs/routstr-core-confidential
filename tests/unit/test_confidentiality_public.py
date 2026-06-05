@@ -1030,6 +1030,70 @@ def test_public_model_confidentiality_rejects_payload_evidence_digest_mismatch()
     assert confidentiality is None
 
 
+def test_public_model_confidentiality_accepts_tinfoil_runtime_evidence_digest() -> None:
+    verified_claims = _tinfoil_public_proof_claims()
+    runtime_evidence_digest = _sha256_json_digest(
+        {
+            key: value
+            for key, value in verified_claims.items()
+            if key
+            not in {
+                "payload_policy_digest",
+                "payload_evidence_digest",
+                "payload_verification_nonce",
+                "runtime_evidence_digest",
+            }
+        }
+    )
+    assert runtime_evidence_digest != VALID_EVIDENCE_DIGEST
+    verified_claims["runtime_evidence_digest"] = runtime_evidence_digest
+    proof_claims = {
+        key: value
+        for key, value in verified_claims.items()
+        if key != "runtime_evidence_digest"
+    }
+
+    confidentiality = _public_model_confidentiality(
+        {
+            "enabled": True,
+            "verified": True,
+            "attestation_status": "verified",
+            "mode": "tinfoil",
+            "provider_type": "tinfoil",
+            "verifier": "unit-test-verifier",
+            "policy_digest": VALID_POLICY_DIGEST,
+            "evidence_digest": runtime_evidence_digest,
+            "verified_claims_digest": VALID_CLAIMS_DIGEST,
+            "verified_at": 1_700_000_000,
+            "expires_at": 4_102_444_800,
+            "model_ids": ["tinfoil/gpt-secure"],
+            "model_id_prefixes": [],
+            "supported_endpoints": ["/v1/chat/completions"],
+            "metadata_leakage": ["model"],
+            "_verified_claims": verified_claims,
+            "proof_claims": proof_claims,
+            "confidentiality_policy": {
+                "repo": "tinfoilsh/confidential-model-router",
+                "expected_release_digest": VALID_RELEASE_DIGEST,
+                "require_model_attestations": True,
+                "model_attestation_targets": {
+                    "tinfoil/gpt-secure": {
+                        "repo": "tinfoilsh/confidential-gpt-secure",
+                        "expected_release_digest": VALID_RELEASE_DIGEST,
+                    }
+                },
+            },
+        },
+        model_id="gpt-secure",
+    )
+
+    assert confidentiality is not None
+    assert confidentiality["evidence_digest"] == runtime_evidence_digest
+    assert confidentiality["proof_claims"]["payload_evidence_digest"] == (
+        VALID_EVIDENCE_DIGEST
+    )
+
+
 def test_public_model_confidentiality_rejects_conflicting_tls_aliases() -> None:
     proof_claims = _tinfoil_public_proof_claims()
     proof_claims["tls_public_key"] = "sha256:" + ("5" * 64)
