@@ -3,10 +3,15 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
+  id-token: write
+
+env:
+  IMAGE: ghcr.io/enclava-labs/routstr-core-confidential
 
 jobs:
   build-and-push:
@@ -34,6 +39,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v4
         with:
           context: .
@@ -43,5 +49,13 @@ jobs:
             GIT_COMMIT=${{ steps.gitmeta.outputs.sha }}
             GIT_TAG=${{ steps.gitmeta.outputs.tag }}
           tags: |
-            ghcr.io/routstr/proxy:latest
-            ghcr.io/routstr/core:latest
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.gitmeta.outputs.sha }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
