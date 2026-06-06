@@ -303,11 +303,11 @@ def _get_pricing_rates(
         raise ValueError(f"Invalid model: {response_model}")
 
     if not model_obj.sats_pricing:
-        logger.error(
-            "Model pricing not defined",
+        logger.warning(
+            "Model pricing not defined, falling back to fixed pricing",
             extra={"model": response_model, "model_id": response_model},
         )
-        raise ValueError("Model pricing not defined")
+        return None
 
     try:
         mspp = float(model_obj.sats_pricing.prompt)

@@ -4,6 +4,7 @@ Covers OpenAI vs Anthropic caching formats, edge cases, and billing accuracy.
 """
 
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -343,3 +344,32 @@ async def test_null_usage_block(mock_session: AsyncMock, mock_fixed_pricing: Non
     assert isinstance(result, MaxCostData)
     assert result.input_tokens == 0
     assert result.cache_read_input_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_model_without_sats_pricing_falls_back_to_max_cost(
+    mock_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "fixed_pricing", False)
+    monkeypatch.setattr(settings, "fixed_per_1k_input_tokens", 0)
+    monkeypatch.setattr(settings, "fixed_per_1k_output_tokens", 0)
+
+    response = {
+        "model": "tinfoil/deepseek-v4-pro",
+        "usage": {
+            "prompt_tokens": 8,
+            "completion_tokens": 3,
+            "total_tokens": 11,
+        },
+    }
+
+    with patch(
+        "routstr.proxy.get_model_instance",
+        return_value=SimpleNamespace(sats_pricing=None),
+    ):
+        result = await calculate_cost(response, max_cost=1000, session=mock_session)
+
+    assert isinstance(result, MaxCostData)
+    assert result.total_msats == 1000
+    assert result.input_tokens == 8
+    assert result.output_tokens == 3
