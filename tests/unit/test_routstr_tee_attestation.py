@@ -2720,6 +2720,70 @@ def test_routstr_attestation_statement_binds_provider_public_proof_claims(
     assert confidentiality["proof_claims"] == provider_proof_claims
 
 
+def test_safe_provider_confidentiality_accepts_runtime_provider_evidence_digest() -> None:
+    provider_proof_claims = _provider_proof_claims()
+    confidentiality_policy = {
+        "repo": "tinfoilsh/confidential-model-router",
+        "expected_release_digest": _named_digest("tinfoil-router-release"),
+        "require_model_attestations": True,
+        "model_attestation_targets": {
+            "secure-model": {
+                "repo": "tinfoilsh/confidential-secure-model",
+                "expected_release_digest": _named_digest("secure-model-release"),
+            },
+        },
+    }
+    provider_policy_digest = _provider_policy_digest(
+        policy=confidentiality_policy,
+        model_ids=["secure-model"],
+    )
+    runtime_claims = {
+        **provider_proof_claims,
+        "payload_policy_digest": provider_policy_digest,
+        "runtime_evidence_digest": "placeholder",
+        "payload_verification_nonce": "runtime-nonce",
+    }
+    runtime_digest = _json_digest(
+        {
+            key: value
+            for key, value in runtime_claims.items()
+            if key not in {
+                "payload_evidence_digest",
+                "payload_policy_digest",
+                "payload_verification_nonce",
+                "runtime_evidence_digest",
+            }
+        }
+    )
+    runtime_claims["runtime_evidence_digest"] = runtime_digest
+    provider_proof_claims["payload_policy_digest"] = provider_policy_digest
+
+    confidentiality = _safe_provider_confidentiality(
+        {
+            "enabled": True,
+            "verified": True,
+            "mode": "tinfoil",
+            "verifier": "unit-test-verifier",
+            "policy_digest": provider_policy_digest,
+            "evidence_digest": runtime_digest,
+            "verified_claims_digest": VALID_PROVIDER_CLAIMS_DIGEST,
+            "proof_claims": provider_proof_claims,
+            "verified_at": 1_700_000_000,
+            "expires_at": 4_102_444_800,
+            "model_ids": ["secure-model"],
+            "_verified_claims_for_validation": runtime_claims,
+        },
+        provider_type="tinfoil",
+        provider_base_url="https://inference.tinfoil.sh/v1",
+        public_policy=confidentiality_policy,
+    )
+    assert confidentiality["verified"] is True
+    assert confidentiality["evidence_digest"] == runtime_digest
+    assert confidentiality["proof_claims"] == provider_proof_claims
+    assert "_verified_claims_for_validation" not in json.dumps(confidentiality)
+    assert "runtime-nonce" not in json.dumps(confidentiality)
+
+
 def test_routstr_attestation_statement_accepts_ppq_raw_policy_digest_with_public_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -928,6 +928,8 @@ def _public_confidentiality_status(
                 return status_dict
             status_dict["verified_claims_digest"] = verified_claims_digest
             status_dict["proof_claims"] = proof_claims
+            if include_verified_claims:
+                status_dict["_verified_claims_for_validation"] = verified_claims
     return status_dict
 
 

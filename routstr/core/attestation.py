@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 
 from ..upstream.ehbp import parse_ehbp_key_config
 from .confidentiality_public import (
+    provider_evidence_digest_matches_status,
     public_confidentiality_policy_binds_provider_proof,
     public_provider_proof_claims_cover_model_selectors,
     public_verified_model_selectors_satisfy_provider,
@@ -239,6 +240,9 @@ def _safe_provider_confidentiality(
         public_policy=public_policy,
         reject_secret_source=reject_secret_source,
     )
+    validation_claims = status.get("_verified_claims_for_validation")
+    if not isinstance(validation_claims, dict):
+        validation_claims = None
     model_ids = _public_string_list(status.get("model_ids"))
     model_id_prefixes = _public_string_list(status.get("model_id_prefixes"))
     strict_model_ids = _strict_public_string_list(status.get("model_ids"))
@@ -267,7 +271,11 @@ def _safe_provider_confidentiality(
         and verified_claims_digest is not None
         and proof_claims is not None
         and proof_claims.get("payload_policy_digest") == policy_digest
-        and proof_claims.get("payload_evidence_digest") == evidence_digest
+        and provider_evidence_digest_matches_status(
+            evidence_digest,
+            validation_claims,
+            proof_claims,
+        )
         and verified_at is not None
         and expires_at is not None
         and verified_at <= now
