@@ -7,10 +7,16 @@ sensitive information from log messages without causing false positives.
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
-from routstr.core.logging import SecurityFilter, redact_sensitive_text
+from routstr.core.logging import (
+    SecurityFilter,
+    get_logger,
+    redact_sensitive_text,
+    setup_logging,
+)
 
 
 @pytest.fixture
@@ -210,6 +216,25 @@ def test_ignores_non_sensitive_message(filter_message: Callable[[str], str]) -> 
     original = "No token pricing configured, using base cost"
     expected = "No token pricing configured, using base cost"
     assert filter_message(original) == expected
+
+
+def test_setup_logging_uses_configured_log_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    log_dir = tmp_path / "state" / "logs"
+    monkeypatch.chdir(app_dir)
+    monkeypatch.setenv("ROUTSTR_LOG_DIR", str(log_dir))
+
+    setup_logging()
+    logger = get_logger("routstr")
+    logger.info("configured log dir test")
+    for handler in logger.handlers:
+        handler.flush()
+
+    assert list(log_dir.glob("app_*.log"))
+    assert not (app_dir / "logs").exists()
 
 
 def test_multiple_secrets_in_one_message(filter_message: Callable[[str], str]) -> None:

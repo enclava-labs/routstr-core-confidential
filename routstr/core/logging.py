@@ -362,11 +362,18 @@ def should_enable_console_logging() -> bool:
         )
 
 
+def get_log_dir() -> str:
+    """Return the directory used for Routstr file logs."""
+    return os.environ.get("ROUTSTR_LOG_DIR", "logs") or "logs"
+
+
 def setup_logging() -> None:
     """Configure centralized logging for the application."""
 
     log_level = get_log_level()
     console_enabled = should_enable_console_logging()
+    log_dir = get_log_dir()
+    log_file = os.path.join(log_dir, "app.log")
 
     # Determine which handlers to use
     handlers = ["file"]
@@ -418,7 +425,7 @@ def setup_logging() -> None:
                 "()": DailyRotatingFileHandler,
                 "level": log_level,
                 "formatter": "json",
-                "filename": "logs/app.log",
+                "filename": log_file,
                 "when": "midnight",  # Rotate at midnight each day
                 "interval": 1,  # Every 1 day
                 "backupCount": 30,  # Keep 30 days of logs
@@ -507,7 +514,7 @@ def setup_logging() -> None:
         },
     }
 
-    os.makedirs("logs", exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
 
     logging.config.dictConfig(LOGGING_CONFIG)
 
