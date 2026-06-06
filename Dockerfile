@@ -20,6 +20,8 @@ WORKDIR /app
 
 COPY . .
 
+RUN mkdir -p /app/data/logs && chown -R 10001:10001 /app/data
+
 ARG GIT_COMMIT=""
 ARG GIT_TAG=""
 ENV GIT_COMMIT=${GIT_COMMIT}
