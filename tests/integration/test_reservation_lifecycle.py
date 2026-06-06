@@ -17,6 +17,7 @@ import uuid
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.auth import pay_for_request, revert_pay_for_request
@@ -25,6 +26,7 @@ from routstr.core.db import ApiKey, create_session
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_key(balance: int, reserved: int = 0) -> ApiKey:
     return ApiKey(
@@ -47,6 +49,7 @@ async def _persist(session: AsyncSession, key: ApiKey) -> ApiKey:
 # Test 1 — Reserve: reserved_balance increases, available balance decreases
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_reserve_increases_reserved_balance(
     integration_session: AsyncSession,
@@ -66,6 +69,7 @@ async def test_reserve_increases_reserved_balance(
 # ---------------------------------------------------------------------------
 # Test 2 — Revert: reserved_balance restored, balance untouched
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_revert_releases_reservation(
@@ -89,6 +93,7 @@ async def test_revert_releases_reservation(
 # ---------------------------------------------------------------------------
 # Test 3 — Finalise: reservation released + balance charged
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_finalise_releases_reservation_and_charges_balance(
@@ -117,7 +122,10 @@ async def test_finalise_releases_reservation_and_charges_balance(
         input_tokens=50,
         output_tokens=50,
     )
-    response_data = {"model": "test-model", "usage": {"prompt_tokens": 50, "completion_tokens": 50}}
+    response_data = {
+        "model": "test-model",
+        "usage": {"prompt_tokens": 50, "completion_tokens": 50},
+    }
 
     with patch("routstr.auth.calculate_cost", return_value=cost_data):
         await adjust_payment_for_tokens(key, response_data, integration_session, cost)
@@ -129,9 +137,85 @@ async def test_finalise_releases_reservation_and_charges_balance(
     assert key.total_spent == actual
 
 
+@pytest.mark.asyncio
+async def test_null_reserved_balance_is_normalized_before_reserve_and_finalize(
+    integration_session: AsyncSession,
+) -> None:
+    """Existing SQLite rows with NULL reserved_balance must not break payment flow."""
+    from unittest.mock import patch
+
+    from routstr.auth import adjust_payment_for_tokens
+    from routstr.payment.cost_calculation import CostData
+
+    cost = 100
+    actual = 80
+
+    await integration_session.execute(text("DROP TABLE api_keys"))
+    await integration_session.execute(
+        text(
+            """
+            CREATE TABLE api_keys (
+                hashed_key VARCHAR NOT NULL PRIMARY KEY,
+                balance INTEGER NOT NULL,
+                reserved_balance INTEGER,
+                refund_address VARCHAR,
+                key_expiry_time INTEGER,
+                total_spent INTEGER NOT NULL,
+                total_requests INTEGER NOT NULL,
+                created_at INTEGER,
+                refund_mint_url VARCHAR,
+                refund_currency VARCHAR,
+                parent_key_hash VARCHAR,
+                balance_limit INTEGER,
+                balance_limit_reset VARCHAR,
+                balance_limit_reset_date INTEGER,
+                validity_date INTEGER
+            )
+            """
+        )
+    )
+    key = await _persist(integration_session, _make_key(balance=500))
+    await integration_session.execute(
+        text(
+            "UPDATE api_keys SET reserved_balance = NULL WHERE hashed_key = :hashed_key"
+        ),
+        {"hashed_key": key.hashed_key},
+    )
+    await integration_session.commit()
+    await integration_session.refresh(key)
+    assert key.reserved_balance is None
+
+    await pay_for_request(key, cost, integration_session)
+    await integration_session.refresh(key)
+    assert key.reserved_balance == cost
+
+    cost_data = CostData(
+        base_msats=0,
+        input_msats=40,
+        output_msats=40,
+        total_msats=actual,
+        total_usd=0.0,
+        input_tokens=50,
+        output_tokens=50,
+    )
+    response_data = {
+        "model": "test-model",
+        "usage": {"prompt_tokens": 50, "completion_tokens": 50},
+    }
+
+    with patch("routstr.auth.calculate_cost", return_value=cost_data):
+        await adjust_payment_for_tokens(key, response_data, integration_session, cost)
+
+    await integration_session.refresh(key)
+    assert key.reserved_balance == 0
+    assert key.balance == 500 - actual
+    assert key.total_spent == actual
+
+
 # ---------------------------------------------------------------------------
 # Test 4 — Concurrent: second parallel reserve blocked when balance exhausted
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_concurrent_second_reserve_blocked_when_balance_exhausted(
@@ -144,7 +228,7 @@ async def test_concurrent_second_reserve_blocked_when_balance_exhausted(
     async with create_session() as session:
         key = ApiKey(
             hashed_key=key_hash,
-            balance=300,       # exactly enough for ONE reservation
+            balance=300,  # exactly enough for ONE reservation
             reserved_balance=0,
             total_spent=0,
             total_requests=0,
@@ -186,6 +270,7 @@ async def test_concurrent_second_reserve_blocked_when_balance_exhausted(
 # Test 5 — Concurrent: three requests, two fit, third blocked
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_three_parallel_reserves_third_blocked(
     patched_db_engine: None,
@@ -197,7 +282,7 @@ async def test_three_parallel_reserves_third_blocked(
     async with create_session() as session:
         key = ApiKey(
             hashed_key=key_hash,
-            balance=200,       # fits exactly 2 reservations of 100
+            balance=200,  # fits exactly 2 reservations of 100
             reserved_balance=0,
             total_spent=0,
             total_requests=0,
@@ -243,6 +328,7 @@ async def test_three_parallel_reserves_third_blocked(
 # ---------------------------------------------------------------------------
 # Test 6 — Sequential exhaustion: reserve until empty, next request blocked
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_sequential_reserves_block_when_balance_exhausted(

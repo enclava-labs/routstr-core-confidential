@@ -79,7 +79,9 @@ async def require_admin_api(request: Request) -> None:
     async with create_session() as session:
         result = await session.exec(select(CliToken).where(CliToken.token == token))
         cli_token = result.first()
-        if cli_token and (cli_token.expires_at is None or cli_token.expires_at > now_ts):
+        if cli_token and (
+            cli_token.expires_at is None or cli_token.expires_at > now_ts
+        ):
             cli_token.last_used_at = now_ts
             session.add(cli_token)
             await session.commit()
@@ -205,6 +207,7 @@ async def create_apikey(payload: ApiKeyCreate) -> dict[str, object]:
         key = ApiKey(
             hashed_key=raw_key,
             balance=payload.balance_msats,
+            reserved_balance=0,
             refund_address=payload.refund_address,
             refund_mint_url=payload.refund_mint_url,
             refund_currency=payload.refund_currency,
@@ -224,7 +227,7 @@ async def create_apikey(payload: ApiKeyCreate) -> dict[str, object]:
         "api_key": "sk-" + key.hashed_key,
         "hashed_key": key.hashed_key,
         "balance": key.balance,
-        "reserved_balance": key.reserved_balance,
+        "reserved_balance": key.reserved_balance or 0,
         "total_spent": key.total_spent,
         "total_requests": key.total_requests,
         "refund_address": key.refund_address,
@@ -918,7 +921,8 @@ CONFIDENTIAL_MODE_PROVIDER_TYPES = {
     "privatemode": "privatemode",
 }
 CONFIDENTIAL_PROVIDER_TYPE_MODES = {
-    provider_type: mode for mode, provider_type in CONFIDENTIAL_MODE_PROVIDER_TYPES.items()
+    provider_type: mode
+    for mode, provider_type in CONFIDENTIAL_MODE_PROVIDER_TYPES.items()
 }
 SUPPORTED_CONFIDENTIAL_PROVIDER_MODES = (
     "tinfoil",
@@ -951,8 +955,7 @@ def _confidentiality_mode_provider_type_violation(
     normalized_provider_type = provider_type.strip().lower()
     if normalized_provider_type != expected_provider_type:
         return (
-            f"confidentiality mode {mode} does not match provider_type "
-            f"{provider_type}"
+            f"confidentiality mode {mode} does not match provider_type {provider_type}"
         )
     return None
 
@@ -1000,7 +1003,9 @@ def _confidentiality_runtime_loadability_violation(
     except Exception as exc:
         return f"confidential provider settings are not runtime-loadable: {exc}"
     if policy is None:
-        return "confidential provider settings are not runtime-loadable by Routstr runtime"
+        return (
+            "confidential provider settings are not runtime-loadable by Routstr runtime"
+        )
     if policy.mode != expected_mode:
         return (
             f"confidentiality mode {policy.mode} does not match provider_type "
@@ -1272,7 +1277,9 @@ async def get_upstream_provider(provider_id: int) -> dict[str, object]:
             "api_version": provider.api_version,
             "enabled": provider.enabled,
             "provider_fee": provider.provider_fee,
-            "provider_settings": _provider_settings_from_json(provider.provider_settings),
+            "provider_settings": _provider_settings_from_json(
+                provider.provider_settings
+            ),
         }
 
 
@@ -2020,7 +2027,11 @@ async def get_transactions_api(
         )
         total = count_result.one()
 
-        stmt = base.order_by(col(CashuTransaction.created_at).desc()).offset(offset).limit(limit)
+        stmt = (
+            base.order_by(col(CashuTransaction.created_at).desc())
+            .offset(offset)
+            .limit(limit)
+        )
         results = await session.exec(stmt)
         transactions = results.all()
 
@@ -2030,9 +2041,7 @@ async def get_transactions_api(
         }
 
 
-@admin_router.get(
-    "/api/lightning-invoices", dependencies=[Depends(require_admin_api)]
-)
+@admin_router.get("/api/lightning-invoices", dependencies=[Depends(require_admin_api)])
 async def get_lightning_invoices_api(
     status: str | None = None,
     purpose: str | None = None,

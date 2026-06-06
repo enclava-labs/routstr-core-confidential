@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy import case
+from sqlalchemy import case, func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select, update
 
@@ -28,9 +28,20 @@ payments_logger = get_logger("routstr.payments")
 
 # Routstr platform fee constants
 ROUTSTR_FEE_PERCENT: float = 2.1
-ROUTSTR_LN_ADDRESS: str = "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qqdufs7ql29s@npub.cash"
+ROUTSTR_LN_ADDRESS: str = (
+    "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qqdufs7ql29s@npub.cash"
+)
 ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS: int = 900
 ROUTSTR_FEE_DEFAULT_PAYOUT: int = 200
+
+
+def _reserved_balance_value(key: ApiKey) -> int:
+    return key.reserved_balance or 0
+
+
+def _reserved_balance_column():
+    return func.coalesce(col(ApiKey.reserved_balance), 0)
+
 
 # TODO: implement prepaid api key (not like it was before)
 # PREPAID_API_KEY = os.environ.get("PREPAID_API_KEY", None)
@@ -183,14 +194,16 @@ async def validate_bearer_key(
             if (
                 min_cost > 0
                 and existing_key.balance_limit is not None
-                and existing_key.total_spent + existing_key.reserved_balance + min_cost
+                and existing_key.total_spent
+                + _reserved_balance_value(existing_key)
+                + min_cost
                 > existing_key.balance_limit
             ):
                 raise HTTPException(
                     status_code=402,
                     detail={
                         "error": {
-                            "message": f"Balance limit exceeded: {existing_key.balance_limit} mSats limit. {existing_key.total_spent} already spent ({existing_key.reserved_balance} reserved), {min_cost} minimum required for this model.",
+                            "message": f"Balance limit exceeded: {existing_key.balance_limit} mSats limit. {existing_key.total_spent} already spent ({_reserved_balance_value(existing_key)} reserved), {min_cost} minimum required for this model.",
                             "type": "insufficient_quota",
                             "code": "balance_limit_exceeded",
                         }
@@ -454,7 +467,7 @@ async def pay_for_request(
                 "key_hash": key.hashed_key[:8] + "...",
                 "billing_key_hash": billing_key.hashed_key[:8] + "...",
                 "balance": billing_key.balance,
-                "reserved_balance": billing_key.reserved_balance,
+                "reserved_balance": _reserved_balance_value(billing_key),
                 "required": cost_per_request,
                 "shortfall": cost_per_request - billing_key.total_balance,
             },
@@ -464,7 +477,7 @@ async def pay_for_request(
             status_code=402,
             detail={
                 "error": {
-                    "message": f"Insufficient balance: {cost_per_request} mSats required. {billing_key.total_balance} available. (reserved: {billing_key.reserved_balance})",
+                    "message": f"Insufficient balance: {cost_per_request} mSats required. {billing_key.total_balance} available. (reserved: {_reserved_balance_value(billing_key)})",
                     "type": "insufficient_quota",
                     "code": "insufficient_balance",
                 }
@@ -498,7 +511,7 @@ async def pay_for_request(
         await check_and_reset_limit(key, session)
 
         if (
-            key.total_spent + key.reserved_balance + cost_per_request
+            key.total_spent + _reserved_balance_value(key) + cost_per_request
             > key.balance_limit
         ):
             logger.warning(
@@ -506,7 +519,7 @@ async def pay_for_request(
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
                     "total_spent": key.total_spent,
-                    "reserved": key.reserved_balance,
+                    "reserved": _reserved_balance_value(key),
                     "balance_limit": key.balance_limit,
                     "required": cost_per_request,
                 },
@@ -515,7 +528,7 @@ async def pay_for_request(
                 status_code=402,
                 detail={
                     "error": {
-                        "message": f"Balance limit exceeded: {key.balance_limit} mSats limit. {key.total_spent} already spent ({key.reserved_balance} reserved), {cost_per_request} required for this request.",
+                        "message": f"Balance limit exceeded: {key.balance_limit} mSats limit. {key.total_spent} already spent ({_reserved_balance_value(key)} reserved), {cost_per_request} required for this request.",
                         "type": "insufficient_quota",
                         "code": "balance_limit_exceeded",
                     }
@@ -536,9 +549,9 @@ async def pay_for_request(
     stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-        .where(col(ApiKey.balance) - col(ApiKey.reserved_balance) >= cost_per_request)
+        .where(col(ApiKey.balance) - _reserved_balance_column() >= cost_per_request)
         .values(
-            reserved_balance=col(ApiKey.reserved_balance) + cost_per_request,
+            reserved_balance=_reserved_balance_column() + cost_per_request,
             total_requests=col(ApiKey.total_requests) + 1,
         )
     )
@@ -551,7 +564,7 @@ async def pay_for_request(
             .where(col(ApiKey.hashed_key) == key.hashed_key)
             .values(
                 total_requests=col(ApiKey.total_requests) + 1,
-                reserved_balance=col(ApiKey.reserved_balance) + cost_per_request,
+                reserved_balance=_reserved_balance_column() + cost_per_request,
             )
         )
         await session.exec(child_stmt)  # type: ignore[call-overload]
@@ -622,9 +635,9 @@ async def revert_pay_for_request(
     stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-        .where(col(ApiKey.reserved_balance) >= cost_per_request)
+        .where(_reserved_balance_column() >= cost_per_request)
         .values(
-            reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
+            reserved_balance=_reserved_balance_column() - cost_per_request,
             total_requests=col(ApiKey.total_requests) - 1,
         )
     )
@@ -636,10 +649,10 @@ async def revert_pay_for_request(
         child_stmt = (
             update(ApiKey)
             .where(col(ApiKey.hashed_key) == key.hashed_key)
-            .where(col(ApiKey.reserved_balance) >= cost_per_request)
+            .where(_reserved_balance_column() >= cost_per_request)
             .values(
                 total_requests=col(ApiKey.total_requests) - 1,
-                reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
+                reserved_balance=_reserved_balance_column() - cost_per_request,
             )
         )
         await session.exec(child_stmt)  # type: ignore[call-overload]
@@ -652,7 +665,7 @@ async def revert_pay_for_request(
                 "key_hash": key.hashed_key[:8] + "...",
                 "billing_key_hash": billing_key.hashed_key[:8] + "...",
                 "cost_to_revert": cost_per_request,
-                "current_reserved_balance": billing_key.reserved_balance,
+                "current_reserved_balance": _reserved_balance_value(billing_key),
             },
         )
         return False
@@ -702,10 +715,8 @@ async def adjust_payment_for_tokens(
             release_stmt = (
                 update(ApiKey)
                 .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-                .where(col(ApiKey.reserved_balance) >= deducted_max_cost)
-                .values(
-                    reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost
-                )
+                .where(_reserved_balance_column() >= deducted_max_cost)
+                .values(reserved_balance=_reserved_balance_column() - deducted_max_cost)
             )
             result = await session.exec(release_stmt)  # type: ignore[call-overload]
 
@@ -714,10 +725,9 @@ async def adjust_payment_for_tokens(
                 child_release_stmt = (
                     update(ApiKey)
                     .where(col(ApiKey.hashed_key) == key.hashed_key)
-                    .where(col(ApiKey.reserved_balance) >= deducted_max_cost)
+                    .where(_reserved_balance_column() >= deducted_max_cost)
                     .values(
-                        reserved_balance=col(ApiKey.reserved_balance)
-                        - deducted_max_cost
+                        reserved_balance=_reserved_balance_column() - deducted_max_cost
                     )
                 )
                 await session.exec(child_release_stmt)  # type: ignore[call-overload]
@@ -774,13 +784,13 @@ async def adjust_payment_for_tokens(
                 },
             )
             # Finalize by releasing reservation and charging max cost
-            if billing_key.reserved_balance < deducted_max_cost:
+            if _reserved_balance_value(billing_key) < deducted_max_cost:
                 logger.error(
                     "reserved_balance below deducted_max_cost before MaxCost finalization — clamping to 0",
                     extra={
                         "key_hash": key.hashed_key[:8] + "...",
                         "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                        "reserved_balance": billing_key.reserved_balance,
+                        "reserved_balance": _reserved_balance_value(billing_key),
                         "deducted_max_cost": deducted_max_cost,
                         "total_cost_msats": cost.total_msats,
                         "balance": billing_key.balance,
@@ -790,8 +800,10 @@ async def adjust_payment_for_tokens(
                 )
 
             safe_reserved = case(
-                (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                 col(ApiKey.reserved_balance) - deducted_max_cost),
+                (
+                    _reserved_balance_column() >= deducted_max_cost,
+                    _reserved_balance_column() - deducted_max_cost,
+                ),
                 else_=0,
             )
 
@@ -809,8 +821,10 @@ async def adjust_payment_for_tokens(
             # Also update total_spent and reserved_balance on the child key if it's different
             if billing_key.hashed_key != key.hashed_key:
                 child_safe_reserved = case(
-                    (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                     col(ApiKey.reserved_balance) - deducted_max_cost),
+                    (
+                        _reserved_balance_column() >= deducted_max_cost,
+                        _reserved_balance_column() - deducted_max_cost,
+                    ),
                     else_=0,
                 )
                 child_stmt = (
@@ -831,7 +845,9 @@ async def adjust_payment_for_tokens(
                         "key_hash": key.hashed_key[:8] + "...",
                         "billing_key_hash": billing_key.hashed_key[:8] + "...",
                         "deducted_max_cost": deducted_max_cost,
-                        "current_reserved_balance": billing_key.reserved_balance,
+                        "current_reserved_balance": _reserved_balance_value(
+                            billing_key
+                        ),
                         "total_cost": cost.total_msats,
                         "model": model,
                     },
@@ -904,13 +920,13 @@ async def adjust_payment_for_tokens(
                         "model": model,
                     },
                 )
-                if billing_key.reserved_balance < deducted_max_cost:
+                if _reserved_balance_value(billing_key) < deducted_max_cost:
                     logger.error(
                         "reserved_balance below deducted_max_cost on exact-cost finalization — clamping to 0",
                         extra={
                             "key_hash": key.hashed_key[:8] + "...",
                             "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                            "reserved_balance": billing_key.reserved_balance,
+                            "reserved_balance": _reserved_balance_value(billing_key),
                             "deducted_max_cost": deducted_max_cost,
                             "total_cost_msats": total_cost_msats,
                             "balance": billing_key.balance,
@@ -920,8 +936,10 @@ async def adjust_payment_for_tokens(
                     )
 
                 exact_safe_reserved = case(
-                    (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                     col(ApiKey.reserved_balance) - deducted_max_cost),
+                    (
+                        _reserved_balance_column() >= deducted_max_cost,
+                        _reserved_balance_column() - deducted_max_cost,
+                    ),
                     else_=0,
                 )
 
@@ -939,8 +957,10 @@ async def adjust_payment_for_tokens(
                 # Also update total_spent and reserved_balance on the child key if it's different
                 if billing_key.hashed_key != key.hashed_key:
                     child_exact_safe_reserved = case(
-                        (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                         col(ApiKey.reserved_balance) - deducted_max_cost),
+                        (
+                            _reserved_balance_column() >= deducted_max_cost,
+                            _reserved_balance_column() - deducted_max_cost,
+                        ),
                         else_=0,
                     )
                     child_stmt = (
@@ -990,9 +1010,9 @@ async def adjust_payment_for_tokens(
                 finalize_stmt = (
                     update(ApiKey)
                     .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-                    .where(col(ApiKey.reserved_balance) >= deducted_max_cost)
+                    .where(_reserved_balance_column() >= deducted_max_cost)
                     .values(
-                        reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost,
+                        reserved_balance=_reserved_balance_column() - deducted_max_cost,
                         balance=col(ApiKey.balance) - chargeable,
                         total_spent=col(ApiKey.total_spent) + chargeable,
                     )
@@ -1003,10 +1023,12 @@ async def adjust_payment_for_tokens(
                     child_stmt = (
                         update(ApiKey)
                         .where(col(ApiKey.hashed_key) == key.hashed_key)
-                        .where(col(ApiKey.reserved_balance) >= deducted_max_cost)
+                        .where(_reserved_balance_column() >= deducted_max_cost)
                         .values(
-                            reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost,
-                            total_spent=col(ApiKey.total_spent) + min(billing_key.balance, total_cost_msats),
+                            reserved_balance=_reserved_balance_column()
+                            - deducted_max_cost,
+                            total_spent=col(ApiKey.total_spent)
+                            + min(billing_key.balance, total_cost_msats),
                         )
                     )
                     await session.exec(child_stmt)  # type: ignore[call-overload]
@@ -1072,13 +1094,13 @@ async def adjust_payment_for_tokens(
                     },
                 )
 
-                if billing_key.reserved_balance < deducted_max_cost:
+                if _reserved_balance_value(billing_key) < deducted_max_cost:
                     logger.error(
                         "reserved_balance below deducted_max_cost on refund finalization — clamping to 0",
                         extra={
                             "key_hash": key.hashed_key[:8] + "...",
                             "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                            "reserved_balance": billing_key.reserved_balance,
+                            "reserved_balance": _reserved_balance_value(billing_key),
                             "deducted_max_cost": deducted_max_cost,
                             "total_cost_msats": total_cost_msats,
                             "refund_amount": refund,
@@ -1089,8 +1111,10 @@ async def adjust_payment_for_tokens(
                     )
 
                 refund_safe_reserved = case(
-                    (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                     col(ApiKey.reserved_balance) - deducted_max_cost),
+                    (
+                        _reserved_balance_column() >= deducted_max_cost,
+                        _reserved_balance_column() - deducted_max_cost,
+                    ),
                     else_=0,
                 )
 
@@ -1108,8 +1132,10 @@ async def adjust_payment_for_tokens(
                 # Also update total_spent and reserved_balance on the child key if it's different
                 if billing_key.hashed_key != key.hashed_key:
                     child_refund_safe_reserved = case(
-                        (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                         col(ApiKey.reserved_balance) - deducted_max_cost),
+                        (
+                            _reserved_balance_column() >= deducted_max_cost,
+                            _reserved_balance_column() - deducted_max_cost,
+                        ),
                         else_=0,
                     )
                     child_stmt = (
@@ -1131,7 +1157,9 @@ async def adjust_payment_for_tokens(
                             "key_hash": key.hashed_key[:8] + "...",
                             "billing_key_hash": billing_key.hashed_key[:8] + "...",
                             "deducted_max_cost": deducted_max_cost,
-                            "current_reserved_balance": billing_key.reserved_balance,
+                            "current_reserved_balance": _reserved_balance_value(
+                                billing_key
+                            ),
                             "total_cost": total_cost_msats,
                             "model": model,
                         },

@@ -7,6 +7,7 @@ from typing import Annotated, NoReturn
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import col, select, update
 
 from .auth import get_billing_key, validate_bearer_key
@@ -28,6 +29,14 @@ balance_router = APIRouter(prefix="/v1/balance")
 logger = get_logger(__name__)
 
 
+def _reserved_balance_value(key: ApiKey) -> int:
+    return key.reserved_balance or 0
+
+
+def _reserved_balance_column():
+    return func.coalesce(col(ApiKey.reserved_balance), 0)
+
+
 async def get_key_from_header(
     authorization: Annotated[str, Header(...)],
     session: AsyncSession = Depends(get_session),
@@ -46,7 +55,7 @@ async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
     info = {
         "api_key": "sk-" + key.hashed_key,
         "balance": billing_key.total_balance,
-        "reserved": billing_key.reserved_balance,
+        "reserved": _reserved_balance_value(billing_key),
         "is_child": key.parent_key_hash is not None,
         "parent_key": "sk-" + key.parent_key_hash if key.parent_key_hash else None,
         "total_requests": key.total_requests,
@@ -172,7 +181,9 @@ async def topup_wallet_endpoint(
                 detail=f"Failed to swap foreign mint token. {error_msg}",
             )
         else:
-            raise HTTPException(status_code=400, detail=f"Failed to redeem token: {error_msg}")
+            raise HTTPException(
+                status_code=400, detail=f"Failed to redeem token: {error_msg}"
+            )
     except Exception as e:
         logger.error(
             "topup_wallet_endpoint: unhandled error",
@@ -224,7 +235,11 @@ async def _lookup_key_no_create(
 
 
 async def _restore_balance(
-    session: AsyncSession, hashed_key: str, balance: int, reserved_balance: int, mint_url: str
+    session: AsyncSession,
+    hashed_key: str,
+    balance: int,
+    reserved_balance: int,
+    mint_url: str,
 ) -> None:
     """Restore balance after a failed refund mint attempt."""
     restore_stmt = (
@@ -232,14 +247,18 @@ async def _restore_balance(
         .where(col(ApiKey.hashed_key) == hashed_key)
         .values(
             balance=col(ApiKey.balance) + balance,
-            reserved_balance=col(ApiKey.reserved_balance) + reserved_balance,
+            reserved_balance=_reserved_balance_column() + reserved_balance,
         )
     )
     await session.exec(restore_stmt)  # type: ignore[call-overload]
     await session.commit()
     logger.info(
         "refund_wallet_endpoint: balance restored after mint failure",
-        extra={"hashed_key": hashed_key, "restored_balance": balance, "mint_url": mint_url},
+        extra={
+            "hashed_key": hashed_key,
+            "restored_balance": balance,
+            "mint_url": mint_url,
+        },
     )
 
 
@@ -311,7 +330,7 @@ async def refund_wallet_endpoint(
             detail="Cannot refund child key. Please refund the parent key instead.",
         )
 
-    if key.reserved_balance > 0:
+    if _reserved_balance_value(key) > 0:
         raise HTTPException(
             status_code=400,
             detail="Cannot refund key. There are ongoing requests for this api key.",
@@ -331,7 +350,7 @@ async def refund_wallet_endpoint(
 
     # Capture values before debit — the session may refresh key after commit
     pre_debit_balance = key.balance
-    pre_debit_reserved = key.reserved_balance
+    pre_debit_reserved = _reserved_balance_value(key)
 
     # --- DEBIT FIRST: atomically zero the balance before minting tokens ---
     # This prevents the race where a concurrent topup/spend happens between
@@ -340,7 +359,7 @@ async def refund_wallet_endpoint(
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == key.hashed_key)
         .where(col(ApiKey.balance) == pre_debit_balance)
-        .where(col(ApiKey.reserved_balance) == pre_debit_reserved)
+        .where(_reserved_balance_column() == pre_debit_reserved)
         .values(balance=0, reserved_balance=0)
     )
     debit_result = await session.exec(debit_stmt)  # type: ignore[call-overload]
@@ -395,11 +414,23 @@ async def refund_wallet_endpoint(
 
     except HTTPException:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
+        await _restore_balance(
+            session,
+            key.hashed_key,
+            pre_debit_balance,
+            pre_debit_reserved,
+            key.refund_mint_url or "",
+        )
         raise
     except Exception as e:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
+        await _restore_balance(
+            session,
+            key.hashed_key,
+            pre_debit_balance,
+            pre_debit_reserved,
+            key.refund_mint_url or "",
+        )
         error_msg = str(e)
         logger.error(
             "refund_wallet_endpoint: mint/send failed",
@@ -418,7 +449,9 @@ async def refund_wallet_endpoint(
             or "connection" in error_msg.lower()
             or "ConnectError" in str(type(e))
         ):
-            raise HTTPException(status_code=503, detail=f"Mint service unavailable: {error_msg}")
+            raise HTTPException(
+                status_code=503, detail=f"Mint service unavailable: {error_msg}"
+            )
         else:
             raise HTTPException(status_code=500, detail=f"Refund failed: {error_msg}")
 
@@ -607,7 +640,6 @@ async def reset_child_key_spent(
     await session.commit()
 
     return {"success": True, "message": "Child key balance reset successfully."}
-
 
 
 @router.api_route(
