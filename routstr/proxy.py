@@ -1077,6 +1077,7 @@ def get_confidentiality_status(
     include_provider_policy: bool = True,
     include_verified_claims: bool = False,
     include_routstr_tee: bool = True,
+    routstr_tee_ready_override: bool | None = None,
 ) -> dict[str, Any]:
     """Return a safe public snapshot of provider confidentiality state."""
     mode = _public_string(getattr(settings, "confidential_routing_mode", None))
@@ -1132,9 +1133,12 @@ def get_confidentiality_status(
         routstr_tee = _safe_public_routstr_tee_status(get_public_routstr_tee_status())
         if routstr_tee is not None:
             result["routstr_tee"] = routstr_tee
-    routstr_tee_ready = (
-        isinstance(routstr_tee, dict) and routstr_tee.get("ready") is True
-    )
+    if routstr_tee_ready_override is None:
+        routstr_tee_ready = (
+            isinstance(routstr_tee, dict) and routstr_tee.get("ready") is True
+        )
+    else:
+        routstr_tee_ready = routstr_tee_ready_override is True
     routable_with_full_attestation = _routable_with_full_attestation(
         routstr_tee_ready=routstr_tee_ready,
     )

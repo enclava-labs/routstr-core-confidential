@@ -427,13 +427,20 @@ def _public_provider_base_url(
     return base_url
 
 
-def _routing_policy_snapshot() -> dict[str, Any]:
+def _routing_policy_snapshot(
+    *,
+    routstr_tee_ready: bool | None = None,
+) -> dict[str, Any]:
     from .. import proxy as proxy_module
 
-    status = proxy_module.get_confidentiality_status(
-        include_provider_urls=True,
-        include_routstr_tee=False,
-    )
+    status_kwargs: dict[str, Any] = {
+        "include_provider_urls": True,
+        "include_routstr_tee": False,
+    }
+    if routstr_tee_ready is True:
+        status_kwargs["include_verified_claims"] = True
+        status_kwargs["routstr_tee_ready_override"] = True
+    status = proxy_module.get_confidentiality_status(**status_kwargs)
     routable_with_full_attestation = _safe_routable_with_full_attestation(
         status.get("routable_with_full_attestation")
     )
@@ -2319,7 +2326,7 @@ def get_routstr_tee_readiness() -> dict[str, Any]:
         "Routstr TEE evidence prerequisites are unavailable"
     )
     if not failure_reasons:
-        routing_policy = _routing_policy_snapshot()
+        routing_policy = _routing_policy_snapshot(routstr_tee_ready=True)
         if cap_attestation_mode:
             local_verification = _verify_cap_routstr_tee_evidence(
                 tee=tee,
@@ -2416,19 +2423,22 @@ def get_routstr_attestation_statement() -> dict[str, Any]:
             or bool((tee.get("hpke_key_config") or {}).get("available"))
         )
     ):
+        ready_routing_policy = _routing_policy_snapshot(routstr_tee_ready=True)
         if cap_attestation_mode:
             local_verification = _verify_cap_routstr_tee_evidence(
                 tee=tee,
-                routing_policy=routing_policy,
+                routing_policy=ready_routing_policy,
             )
         else:
             local_verification = _verify_routstr_tee_evidence(
                 tee=tee,
-                routing_policy=routing_policy,
+                routing_policy=ready_routing_policy,
             )
         tee["local_verification"], _ = _accepted_routstr_tee_verification(
             local_verification
         )
+        if tee["local_verification"].get("verified") is True:
+            routing_policy = ready_routing_policy
     else:
         tee["local_verification"] = _unverified_routstr_tee_verification(
             str(tee.get("failure_reason") or "Routstr TEE evidence is unavailable")

@@ -3901,6 +3901,17 @@ async def test_confidentiality_status_accepts_cap_attested_tls_boundary(
         "freshness": True,
     }
     attestation_statement = attestation_response.json()
+    routing_policy = attestation_statement["routing_policy"]
+    routing_provider = routing_policy["providers"][0]
+    assert routing_policy["routable_with_full_attestation"] == {
+        "tinfoil": ["tinfoil/gpt-secure"],
+        "ppq-private": [],
+        "privatemode": [],
+    }
+    assert routing_provider["confidentiality"]["verified"] is True
+    assert routing_provider["confidentiality"]["proof_claims"][
+        "model_attestations"
+    ]["tinfoil/gpt-secure"]["release_digest"].startswith("sha256:")
     tee_statement = attestation_statement["tee"]
     assert tee_statement["evidence_format"] == "cap-attestation-proxy-status"
     assert tee_statement["attestation_source"] == "cap-attestation-proxy"
