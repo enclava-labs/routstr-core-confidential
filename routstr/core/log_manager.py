@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Iterator, TypeVar
 
-from .logging import get_logger
+from .logging import get_log_dir, get_logger
 from .usage_analytics_store import UsageAnalyticsStore
 
 logger = get_logger(__name__)
@@ -15,9 +15,9 @@ T = TypeVar("T")
 
 
 class LogManager:
-    def __init__(self, logs_dir: Path = Path("logs")):
-        self.logs_dir = logs_dir
-        self._usage_store = UsageAnalyticsStore(logs_dir=logs_dir)
+    def __init__(self, logs_dir: Path | None = None):
+        self.logs_dir = Path(get_log_dir()) if logs_dir is None else logs_dir
+        self._usage_store = UsageAnalyticsStore(logs_dir=self.logs_dir)
         self._analytics_cache_ttl_seconds = 30.0
         self._analytics_cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
         self._analytics_cache_lock = Lock()

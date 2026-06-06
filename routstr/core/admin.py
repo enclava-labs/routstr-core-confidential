@@ -4,7 +4,6 @@ import math
 import secrets
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, RootModel
@@ -1960,7 +1959,7 @@ async def get_logs_api(
 
 @admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
 async def get_log_dates_api(request: Request) -> dict[str, object]:
-    logs_dir = Path("logs")
+    logs_dir = log_manager.logs_dir
     dates = []
 
     if logs_dir.exists():

@@ -5,6 +5,7 @@ sensitive information from log messages without causing false positives.
 
 """
 
+import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -234,6 +235,37 @@ def test_setup_logging_uses_configured_log_dir(
         handler.flush()
 
     assert list(log_dir.glob("app_*.log"))
+    assert not (app_dir / "logs").exists()
+
+
+def test_log_manager_reads_configured_log_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    log_dir = tmp_path / "state" / "logs"
+    log_dir.mkdir(parents=True)
+    monkeypatch.chdir(app_dir)
+    monkeypatch.setenv("ROUTSTR_LOG_DIR", str(log_dir))
+
+    request_id = "configured-log-dir-request"
+    (log_dir / "app_2026-06-06.log").write_text(
+        json.dumps(
+            {
+                "asctime": "2026-06-06 12:00:00",
+                "levelname": "ERROR",
+                "message": "configured log dir lookup",
+                "request_id": request_id,
+            }
+        )
+        + "\n"
+    )
+
+    from routstr.core.log_manager import LogManager
+
+    assert [entry["request_id"] for entry in LogManager().search_logs()] == [
+        request_id
+    ]
     assert not (app_dir / "logs").exists()
 
 
