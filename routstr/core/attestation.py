@@ -11,7 +11,9 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable, cast
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 from ..upstream.ehbp import parse_ehbp_key_config
 from .confidentiality_public import (
@@ -33,6 +35,17 @@ REQUIRED_ROUTSTR_TEE_VERIFICATION_STEPS = (
     "public_key_binding",
     "freshness",
 )
+CAP_ROUTSTR_TEE_VERIFICATION_STEPS = (
+    "cap_status_verified",
+    "cap_claims_verified",
+    "cap_state_unlocked",
+    "tls_terminates_in_attested_tee",
+    "freshness",
+)
+PUBLIC_ROUTSTR_TEE_VERIFICATION_STEPS = (
+    *REQUIRED_ROUTSTR_TEE_VERIFICATION_STEPS,
+    *CAP_ROUTSTR_TEE_VERIFICATION_STEPS,
+)
 
 REQUIRED_ROUTSTR_TEE_PROOF_CLAIMS = (
     "hpke_key_config_digest",
@@ -46,6 +59,17 @@ REQUIRED_ROUTSTR_TEE_PROOF_CLAIMS = (
 PUBLIC_ROUTSTR_TEE_PROOF_CLAIMS = (
     "attested_local_artifacts",
     "attestation_document_format",
+    "cap_attestation_url",
+    "cap_claims_instance_id",
+    "cap_claims_verified",
+    "cap_instance_id",
+    "cap_mode",
+    "cap_state",
+    "cap_status_digest",
+    "cap_status_url",
+    "cap_tee_domain",
+    "cap_tenant_id",
+    "client_confidentiality_boundary",
     "hpke_key_config_digest",
     "hpke_public_key_digest",
     "public_key_digest",
@@ -57,6 +81,7 @@ PUBLIC_ROUTSTR_TEE_PROOF_CLAIMS = (
     "tee_report_data_hex",
     "tee_report_nonce",
     "tee_report_nonce_digest",
+    "tls_terminates_in_attested_tee",
     "verification_steps",
 )
 DEFAULT_ROUTSTR_TEE_VERIFIER_MAX_AGE_SECONDS = 300
@@ -524,6 +549,260 @@ def _timeout_seconds() -> float:
     return max(0.1, min(timeout, 60.0))
 
 
+def _cap_status_timeout_seconds() -> float:
+    raw_timeout = getattr(settings, "routstr_tee_cap_status_timeout_seconds", 2.0)
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        return 2.0
+    return max(0.1, min(timeout, 10.0))
+
+
+def _cap_attestation_enabled() -> bool:
+    return bool(getattr(settings, "routstr_tee_cap_attestation_enabled", False))
+
+
+def _validated_cap_status_url() -> str:
+    raw_url = str(
+        getattr(settings, "routstr_tee_cap_status_url", "")
+        or "http://127.0.0.1:8081/status"
+    ).strip()
+    parsed = urlsplit(raw_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("ROUTSTR_TEE_CAP_STATUS_URL must use http or https")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("ROUTSTR_TEE_CAP_STATUS_URL must include a host")
+    if host != "localhost":
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError(
+                "ROUTSTR_TEE_CAP_STATUS_URL must point at loopback; use the "
+                "CAP attestation proxy inside the same TEE pod"
+            ) from exc
+    return raw_url
+
+
+def _public_cap_base_url() -> str | None:
+    raw_url = str(getattr(settings, "routstr_tee_cap_public_base_url", "") or "").strip()
+    if raw_url:
+        parsed = urlsplit(raw_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return None
+        return raw_url.rstrip("/")
+
+    tee_domain = str(getattr(settings, "routstr_tee_cap_tee_domain", "") or "").strip()
+    if not tee_domain:
+        return None
+    return f"https://{tee_domain}/.well-known/confidential"
+
+
+def _cap_tee_domain() -> str | None:
+    tee_domain = str(getattr(settings, "routstr_tee_cap_tee_domain", "") or "").strip()
+    if tee_domain:
+        return tee_domain
+    base_url = _public_cap_base_url()
+    if not base_url:
+        return None
+    host = urlsplit(base_url).hostname
+    return host or None
+
+
+def _fetch_cap_attestation_status() -> dict[str, Any]:
+    url = _validated_cap_status_url()
+    request = Request(url, headers={"Accept": "application/json"})
+    try:
+        with urlopen(request, timeout=_cap_status_timeout_seconds()) as response:
+            payload = response.read(64 * 1024)
+    except HTTPError as exc:
+        raise ValueError(f"CAP attestation status returned HTTP {exc.code}") from exc
+    except URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        raise ValueError(f"CAP attestation status request failed: {reason}") from exc
+    except Exception as exc:
+        raise ValueError(
+            f"CAP attestation status request failed: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    try:
+        status = _loads_strict_json(payload, "CAP attestation status JSON")
+    except Exception as exc:
+        raise ValueError(f"CAP attestation status is not valid JSON: {exc}") from exc
+    if not isinstance(status, dict):
+        raise ValueError("CAP attestation status must be a JSON object")
+    return status
+
+
+def _safe_cap_attestation_status(status: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key in (
+        "auto_unlock_enabled",
+        "ciphertext_backend",
+        "claims_error",
+        "claims_instance_id",
+        "claims_verified",
+        "config_ready",
+        "error",
+        "instance_id",
+        "mode",
+        "state",
+        "tenant_id",
+        "tenant_instance_identity_hash",
+    ):
+        value = status.get(key)
+        if isinstance(value, (str, bool, int)) or value is None:
+            safe[key] = value
+    return safe
+
+
+def _cap_status_failure(status: dict[str, Any]) -> str | None:
+    if status.get("claims_verified") is not True:
+        return "CAP attestation proxy claims are not verified"
+    if status.get("state") != "unlocked":
+        return "CAP attestation proxy state is not unlocked"
+    if status.get("error") not in (None, ""):
+        return "CAP attestation proxy reports an error"
+    if status.get("claims_error") not in (None, ""):
+        return "CAP attestation proxy reports a claims error"
+    if not _public_string(status.get("tenant_id")):
+        return "CAP attestation proxy tenant_id is missing"
+    if not _public_string(status.get("claims_instance_id")):
+        return "CAP attestation proxy claims_instance_id is missing"
+    return None
+
+
+def _cap_attestation_status_evidence() -> dict[str, Any]:
+    base_url = _public_cap_base_url()
+    tee_domain = _cap_tee_domain()
+    status_url = f"{base_url}/status" if base_url else None
+    attestation_url = f"{base_url}/attestation" if base_url else None
+    base: dict[str, Any] = {
+        "available": False,
+        "status_digest": None,
+        "status_url": status_url,
+        "attestation_url": attestation_url,
+        "tee_domain": tee_domain,
+        "failure_reason": None,
+    }
+
+    if not base_url:
+        base["failure_reason"] = (
+            "ROUTSTR_TEE_CAP_PUBLIC_BASE_URL must be HTTPS or "
+            "ROUTSTR_TEE_CAP_TEE_DOMAIN is required"
+        )
+        return base
+    if not tee_domain:
+        base["failure_reason"] = "ROUTSTR_TEE_CAP_TEE_DOMAIN is required"
+        return base
+
+    try:
+        status = _fetch_cap_attestation_status()
+    except Exception as exc:
+        base["failure_reason"] = str(exc)
+        return base
+
+    safe_status = _safe_cap_attestation_status(status)
+    base["status"] = safe_status
+    base["status_digest"] = _sha256_json(safe_status)
+    if failure := _cap_status_failure(safe_status):
+        base["failure_reason"] = failure
+        return base
+
+    base["available"] = True
+    return base
+
+
+def _verify_cap_routstr_tee_evidence(
+    *,
+    tee: dict[str, Any],
+    routing_policy: dict[str, Any],
+) -> dict[str, Any]:
+    cap = tee.get("cap_attestation")
+    if not isinstance(cap, dict):
+        return _unverified_routstr_tee_verification(
+            "CAP attestation proxy status is unavailable"
+        )
+    if cap.get("available") is not True:
+        return _unverified_routstr_tee_verification(
+            str(cap.get("failure_reason") or "CAP attestation proxy is not verified")
+        )
+    status = cap.get("status")
+    if not isinstance(status, dict):
+        return _unverified_routstr_tee_verification(
+            "CAP attestation proxy status is unavailable"
+        )
+    status_digest = cap.get("status_digest")
+    if not _is_prefixed_sha256_digest_value(status_digest):
+        return _unverified_routstr_tee_verification(
+            "CAP attestation proxy status digest must be a sha256 digest"
+        )
+    tee_domain = _public_string(cap.get("tee_domain"))
+    if tee_domain is None:
+        return _unverified_routstr_tee_verification(
+            "ROUTSTR_TEE_CAP_TEE_DOMAIN is required"
+        )
+    for claim, label in (
+        ("status_url", "CAP attestation status URL"),
+        ("attestation_url", "CAP attestation URL"),
+    ):
+        claim_url = _public_string(cap.get(claim))
+        if claim_url is None or urlsplit(claim_url).scheme != "https":
+            return _unverified_routstr_tee_verification(f"{label} must be HTTPS")
+    boundary = _public_string(
+        getattr(settings, "routstr_tee_client_confidentiality_boundary", "")
+    )
+    if boundary is not None:
+        boundary = boundary.lower()
+    if boundary != CLIENT_CONFIDENTIALITY_BOUNDARY_ATTESTED_TLS:
+        return _unverified_routstr_tee_verification(
+            "CAP attestation requires attested TLS termination as the "
+            "client confidentiality boundary"
+        )
+
+    now = int(time.time())
+    max_age = getattr(settings, "routstr_tee_cap_verifier_max_age_seconds", 300)
+    try:
+        max_age = int(max_age)
+    except (TypeError, ValueError):
+        max_age = 300
+    max_age = max(1, min(max_age, 3600))
+    routing_policy_digest = _sha256_json(routing_policy)
+    verified_claims = {
+        "attestation_document_format": "cap-attestation-proxy-status",
+        "cap_attestation_url": cap.get("attestation_url"),
+        "cap_claims_instance_id": status.get("claims_instance_id"),
+        "cap_claims_verified": status.get("claims_verified") is True,
+        "cap_instance_id": status.get("instance_id"),
+        "cap_mode": status.get("mode"),
+        "cap_state": status.get("state"),
+        "cap_status_digest": status_digest,
+        "cap_status_url": cap.get("status_url"),
+        "cap_tee_domain": tee_domain,
+        "cap_tenant_id": status.get("tenant_id"),
+        "client_confidentiality_boundary": boundary,
+        "routstr_config_measurement": routing_policy_digest,
+        "tls_terminates_in_attested_tee": True,
+        "verification_steps": {
+            "cap_status_verified": True,
+            "cap_claims_verified": True,
+            "cap_state_unlocked": True,
+            "tls_terminates_in_attested_tee": True,
+            "freshness": True,
+        },
+    }
+    return {
+        "verified": True,
+        "verifier": "cap-attestation-proxy",
+        "verified_at": now,
+        "expires_at": now + max_age,
+        "failure_reason": None,
+        "evidence_digest": cast(str, status_digest),
+        "verified_claims": verified_claims,
+    }
+
+
 def _routstr_tee_required_for_public_status() -> bool:
     mode = str(getattr(settings, "confidential_routing_mode", "disabled") or "")
     return mode.strip().lower() in {
@@ -867,8 +1146,11 @@ def _current_routstr_tee_verification_failure(status: dict[str, Any]) -> str | N
         return None
     if verified is not True:
         return "Routstr TEE local verification verified must be true"
-    if not _public_string(status.get("verifier")):
+    verifier = _public_string(status.get("verifier"))
+    if verifier is None:
         return "Routstr TEE local verification verifier must be a non-empty string"
+    if verifier == "cap-attestation-proxy":
+        return _cap_routstr_tee_verification_failure(status)
     if not _is_prefixed_sha256_digest_value(status.get("evidence_digest")):
         return "Routstr TEE local verification evidence_digest must be a sha256 digest"
     verified_claims = status.get("verified_claims")
@@ -940,6 +1222,82 @@ def _current_routstr_tee_verification_failure(status: dict[str, Any]) -> str | N
         return "Routstr TEE local verification must include a future expires_at"
     if expires_at <= now:
         return "Routstr TEE local verification has expired"
+    return None
+
+
+def _cap_routstr_tee_verification_failure(status: dict[str, Any]) -> str | None:
+    if not _is_prefixed_sha256_digest_value(status.get("evidence_digest")):
+        return "CAP Routstr TEE verification evidence_digest must be a sha256 digest"
+    verified_claims = status.get("verified_claims")
+    if not isinstance(verified_claims, dict) or not verified_claims:
+        return "CAP Routstr TEE verification must include proof claims"
+    if verified_claims.get("cap_claims_verified") is not True:
+        return "CAP Routstr TEE verification cap_claims_verified must be true"
+    if verified_claims.get("cap_state") != "unlocked":
+        return "CAP Routstr TEE verification cap_state must be unlocked"
+    if (
+        verified_claims.get("client_confidentiality_boundary")
+        != CLIENT_CONFIDENTIALITY_BOUNDARY_ATTESTED_TLS
+    ):
+        return (
+            "CAP Routstr TEE verification client_confidentiality_boundary must "
+            "be attested-tls-termination"
+        )
+    if verified_claims.get("tls_terminates_in_attested_tee") is not True:
+        return (
+            "CAP Routstr TEE verification must attest TLS termination in the TEE"
+        )
+    for claim in (
+        "cap_attestation_url",
+        "cap_claims_instance_id",
+        "cap_status_url",
+        "cap_tee_domain",
+        "cap_tenant_id",
+    ):
+        if not _public_string(verified_claims.get(claim)):
+            return f"CAP Routstr TEE verification {claim} must be a non-empty string"
+    for url_claim in ("cap_attestation_url", "cap_status_url"):
+        claim_url = _public_string(verified_claims.get(url_claim))
+        if claim_url is None or urlsplit(claim_url).scheme != "https":
+            return f"CAP Routstr TEE verification {url_claim} must be HTTPS"
+    for digest_claim in ("cap_status_digest", "routstr_config_measurement"):
+        if not _is_prefixed_sha256_digest_value(verified_claims.get(digest_claim)):
+            return (
+                "CAP Routstr TEE verification "
+                f"{digest_claim} claim must be a sha256 digest"
+            )
+    if verified_claims.get("cap_status_digest") != status.get("evidence_digest"):
+        return (
+            "CAP Routstr TEE verification cap_status_digest must match "
+            "evidence_digest"
+        )
+    if verification_steps_failure := _routstr_tee_verification_steps_failure(
+        verified_claims.get("verification_steps"),
+        label="CAP Routstr TEE verification",
+        required_steps=CAP_ROUTSTR_TEE_VERIFICATION_STEPS,
+    ):
+        return verification_steps_failure
+    try:
+        _sha256_json(verified_claims)
+    except (TypeError, ValueError):
+        return "CAP Routstr TEE verification verified_claims must be canonical JSON"
+    try:
+        verified_at = _int_result_value(status.get("verified_at"), "verified_at")
+    except ValueError as exc:
+        return f"CAP Routstr TEE verification {exc}"
+    if verified_at is None:
+        return "CAP Routstr TEE verification must include verified_at"
+    now = int(time.time())
+    if verified_at > now:
+        return "CAP Routstr TEE verification verified_at is in the future"
+    try:
+        expires_at = _int_result_value(status.get("expires_at"), "expires_at")
+    except ValueError as exc:
+        return f"CAP Routstr TEE verification {exc}"
+    if expires_at is None:
+        return "CAP Routstr TEE verification must include a future expires_at"
+    if expires_at <= now:
+        return "CAP Routstr TEE verification has expired"
     return None
 
 
@@ -1036,7 +1394,7 @@ def _public_tee_statement(tee: dict[str, Any]) -> dict[str, Any]:
         public_tee["local_verification"] = _public_status_without_raw_details(
             local_verification,
             public_claim_keys=PUBLIC_ROUTSTR_TEE_PROOF_CLAIMS,
-            public_verification_step_keys=REQUIRED_ROUTSTR_TEE_VERIFICATION_STEPS,
+            public_verification_step_keys=PUBLIC_ROUTSTR_TEE_VERIFICATION_STEPS,
             verified_status_failure=_current_routstr_tee_verification_failure,
         )
     return public_tee
@@ -1202,6 +1560,7 @@ def _routstr_tee_verification_steps_failure(
     value: object,
     *,
     label: str,
+    required_steps: tuple[str, ...] = REQUIRED_ROUTSTR_TEE_VERIFICATION_STEPS,
 ) -> str | None:
     if not isinstance(value, dict):
         return f"{label} verification_steps must be a JSON object"
@@ -1209,7 +1568,7 @@ def _routstr_tee_verification_steps_failure(
         return f"{label} verification_steps keys must be non-empty strings"
     if any(not isinstance(step_value, bool) for step_value in value.values()):
         return f"{label} verification_steps values must be JSON booleans"
-    for step in REQUIRED_ROUTSTR_TEE_VERIFICATION_STEPS:
+    for step in required_steps:
         if value.get(step) is not True:
             return f"{label} {step} step is required"
     return None
@@ -1814,6 +2173,30 @@ def _tee_evidence() -> dict[str, Any]:
         "hpke_key_config": _hpke_key_config_evidence(),
     }
 
+    if _cap_attestation_enabled():
+        cap_attestation = _cap_attestation_status_evidence()
+        base["cap_attestation"] = cap_attestation
+        if cap_attestation.get("available") is True:
+            base.update(
+                {
+                    "available": True,
+                    "evidence_format": "cap-attestation-proxy-status",
+                    "attestation_evidence_digest": cap_attestation.get(
+                        "status_digest"
+                    ),
+                    "attestation_source": "cap-attestation-proxy",
+                    "self_verified": True,
+                    "failure_reason": None,
+                }
+            )
+        else:
+            base["attestation_source"] = "cap-attestation-proxy"
+            base["failure_reason"] = str(
+                cap_attestation.get("failure_reason")
+                or "CAP attestation proxy status is unavailable"
+            )
+        return base
+
     if configured_public_key_digest_failure:
         base["failure_reason"] = configured_public_key_digest_failure
         return base
@@ -1868,6 +2251,8 @@ def _live_routstr_tee_attestation_command_failure(tee: dict[str, Any]) -> str | 
         return None
     if tee.get("attestation_command_configured") is True:
         return None
+    if tee.get("attestation_source") == "cap-attestation-proxy":
+        return None
     if tee.get("available") is True:
         return (
             "Routstr TEE attestation command is required for live confidential "
@@ -1900,6 +2285,7 @@ def get_routstr_tee_readiness() -> dict[str, Any]:
     hpke_key_config = tee.get("hpke_key_config")
     if not isinstance(hpke_key_config, dict):
         hpke_key_config = {}
+    cap_attestation_mode = tee.get("attestation_source") == "cap-attestation-proxy"
 
     failure_reasons: list[str] = []
     has_evidence_source = bool(tee.get("available")) or bool(
@@ -1920,7 +2306,7 @@ def get_routstr_tee_readiness() -> dict[str, Any]:
         failure_reasons.append(str(tee["failure_reason"]))
     elif live_command_failure := _live_routstr_tee_attestation_command_failure(tee):
         failure_reasons.append(live_command_failure)
-    if not bool(hpke_key_config.get("available")):
+    if not cap_attestation_mode and not bool(hpke_key_config.get("available")):
         failure_reasons.append(
             str(
                 hpke_key_config.get("failure_reason")
@@ -1933,10 +2319,17 @@ def get_routstr_tee_readiness() -> dict[str, Any]:
         "Routstr TEE evidence prerequisites are unavailable"
     )
     if not failure_reasons:
-        local_verification = _verify_routstr_tee_evidence(
-            tee=tee,
-            routing_policy=_routing_policy_snapshot(),
-        )
+        routing_policy = _routing_policy_snapshot()
+        if cap_attestation_mode:
+            local_verification = _verify_cap_routstr_tee_evidence(
+                tee=tee,
+                routing_policy=routing_policy,
+            )
+        else:
+            local_verification = _verify_routstr_tee_evidence(
+                tee=tee,
+                routing_policy=routing_policy,
+            )
         if local_verification.get("verified") is not True:
             malformed_verification_failure = _current_routstr_tee_verification_failure(
                 local_verification
@@ -1988,7 +2381,7 @@ def get_public_routstr_tee_status() -> dict[str, Any]:
         public_status["local_verification"] = _public_status_without_raw_details(
             local_verification,
             public_claim_keys=PUBLIC_ROUTSTR_TEE_PROOF_CLAIMS,
-            public_verification_step_keys=REQUIRED_ROUTSTR_TEE_VERIFICATION_STEPS,
+            public_verification_step_keys=PUBLIC_ROUTSTR_TEE_VERIFICATION_STEPS,
             verified_status_failure=_current_routstr_tee_verification_failure,
         )
         if public_status["local_verification"].get("verified") is not True:
@@ -2001,6 +2394,7 @@ def get_public_routstr_tee_status() -> dict[str, Any]:
 def get_routstr_attestation_statement() -> dict[str, Any]:
     routing_policy = _routing_policy_snapshot()
     tee = _tee_evidence()
+    cap_attestation_mode = tee.get("attestation_source") == "cap-attestation-proxy"
     has_evidence_source = bool(tee.get("available")) or bool(
         tee.get("attestation_command_configured")
     )
@@ -2017,12 +2411,21 @@ def get_routstr_attestation_statement() -> dict[str, Any]:
     elif (
         has_evidence_source
         and bool(tee.get("evidence_format"))
-        and bool((tee.get("hpke_key_config") or {}).get("available"))
-    ):
-        local_verification = _verify_routstr_tee_evidence(
-            tee=tee,
-            routing_policy=routing_policy,
+        and (
+            cap_attestation_mode
+            or bool((tee.get("hpke_key_config") or {}).get("available"))
         )
+    ):
+        if cap_attestation_mode:
+            local_verification = _verify_cap_routstr_tee_evidence(
+                tee=tee,
+                routing_policy=routing_policy,
+            )
+        else:
+            local_verification = _verify_routstr_tee_evidence(
+                tee=tee,
+                routing_policy=routing_policy,
+            )
         tee["local_verification"], _ = _accepted_routstr_tee_verification(
             local_verification
         )

@@ -164,6 +164,28 @@ class Settings(BaseSettings):
     routstr_tee_verifier_policy_json: str = Field(
         default="", env="ROUTSTR_TEE_VERIFIER_POLICY_JSON"
     )
+    routstr_tee_cap_attestation_enabled: bool = Field(
+        default=False, env="ROUTSTR_TEE_CAP_ATTESTATION_ENABLED"
+    )
+    routstr_tee_cap_status_url: str = Field(
+        default="http://127.0.0.1:8081/status",
+        env="ROUTSTR_TEE_CAP_STATUS_URL",
+    )
+    routstr_tee_cap_status_timeout_seconds: float = Field(
+        default=2.0,
+        env="ROUTSTR_TEE_CAP_STATUS_TIMEOUT_SECONDS",
+    )
+    routstr_tee_cap_tee_domain: str = Field(
+        default="", env="ROUTSTR_TEE_CAP_TEE_DOMAIN"
+    )
+    routstr_tee_cap_public_base_url: str = Field(
+        default="", env="ROUTSTR_TEE_CAP_PUBLIC_BASE_URL"
+    )
+    routstr_tee_cap_verifier_max_age_seconds: int = Field(
+        default=300,
+        gt=0,
+        env="ROUTSTR_TEE_CAP_VERIFIER_MAX_AGE_SECONDS",
+    )
 
     @validator("upstream_provider_fee")
     def _validate_upstream_provider_fee(cls, value: float) -> float:

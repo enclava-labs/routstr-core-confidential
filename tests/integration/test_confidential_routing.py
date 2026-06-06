@@ -3785,6 +3785,138 @@ async def test_confidentiality_status_endpoint_includes_redacted_routstr_tee_sta
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_confidentiality_status_accepts_cap_attested_tls_boundary(
+    integration_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "routstr.core.attestation.time.time",
+        lambda: 1_700_000_010,
+    )
+    monkeypatch.setattr("routstr.proxy.time.time", lambda: 1_700_000_010)
+    provider = BaseUpstreamProvider(
+        base_url="https://inference.tinfoil.sh/v1",
+        api_key="test",
+    )
+    provider.provider_type = "tinfoil"
+    provider.upstream_name = "tinfoil-prod"
+    _mark_provider_verified(provider, model_ids=["tinfoil/gpt-secure"])
+    secure_model = Model(
+        id="tinfoil/gpt-secure",
+        name="Secure Model",
+        created=1,
+        description="desc",
+        context_length=8192,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="gpt",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.001, completion=0.002),
+        supported_endpoints=["/v1/chat/completions"],
+    )
+
+    monkeypatch.setattr(settings, "confidential_routing_mode", "required")
+    monkeypatch.setattr(settings, "routstr_tee_attestation_required", True)
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_client_confidentiality_boundary",
+        "attested-tls-termination",
+    )
+    monkeypatch.setattr(settings, "routstr_attestation_document_path", "")
+    monkeypatch.setattr(settings, "routstr_attestation_document_format", "")
+    monkeypatch.setattr(settings, "routstr_attestation_public_key", "")
+    monkeypatch.setattr(settings, "routstr_attestation_public_key_path", "")
+    monkeypatch.setattr(settings, "routstr_attestation_hpke_key_config_b64", "")
+    monkeypatch.setattr(settings, "routstr_attestation_hpke_key_config_path", "")
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_cap_attestation_enabled",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_cap_tee_domain",
+        "routstr-core.example.tee.enclava.dev",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_cap_public_base_url",
+        "https://routstr-core.example.tee.enclava.dev/.well-known/confidential",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "routstr.core.attestation._fetch_cap_attestation_status",
+        lambda: {
+            "claims_verified": True,
+            "state": "unlocked",
+            "mode": "password",
+            "tenant_id": "cap-test-org-routstr-core",
+            "claims_instance_id": "routstr-core",
+            "instance_id": "cap-test-org-routstr-core-routstr-core",
+            "error": None,
+            "claims_error": None,
+        },
+        raising=False,
+    )
+
+    with (
+        patch("routstr.proxy._upstreams", [provider]),
+        patch("routstr.proxy._model_instances", {"tinfoil/gpt-secure": secure_model}),
+        patch("routstr.proxy._provider_map", {"tinfoil/gpt-secure": [provider]}),
+    ):
+        response = await integration_client.get("/v1/confidentiality/status")
+        attestation_response = await integration_client.get(
+            "/.well-known/routstr-attestation"
+        )
+
+    assert response.status_code == 200
+    assert attestation_response.status_code == 200
+    data = response.json()
+    routstr_tee = data["routstr_tee"]
+    assert routstr_tee["required"] is True
+    assert routstr_tee["ready"] is True
+    assert data["end_to_end_ready"] is True
+    assert routstr_tee["hpke_key_config_digest"] is None
+    assert routstr_tee["local_verification"]["verified"] is True
+    assert routstr_tee["local_verification"]["verifier"] == "cap-attestation-proxy"
+    proof_claims = routstr_tee["local_verification"]["proof_claims"]
+    assert proof_claims["cap_claims_verified"] is True
+    assert proof_claims["cap_state"] == "unlocked"
+    assert proof_claims["cap_tee_domain"] == "routstr-core.example.tee.enclava.dev"
+    assert proof_claims["client_confidentiality_boundary"] == (
+        "attested-tls-termination"
+    )
+    assert proof_claims["verification_steps"] == {
+        "cap_status_verified": True,
+        "cap_claims_verified": True,
+        "cap_state_unlocked": True,
+        "tls_terminates_in_attested_tee": True,
+        "freshness": True,
+    }
+    attestation_statement = attestation_response.json()
+    tee_statement = attestation_statement["tee"]
+    assert tee_statement["evidence_format"] == "cap-attestation-proxy-status"
+    assert tee_statement["attestation_source"] == "cap-attestation-proxy"
+    assert tee_statement["attestation_evidence_digest"] == (
+        routstr_tee["attestation_evidence_digest"]
+    )
+    assert tee_statement["cap_attestation"]["available"] is True
+    assert tee_statement["cap_attestation"]["attestation_url"] == (
+        "https://routstr-core.example.tee.enclava.dev/.well-known/confidential/"
+        "attestation"
+    )
+    assert tee_statement["local_verification"]["proof_claims"][
+        "cap_attestation_url"
+    ] == tee_statement["cap_attestation"]["attestation_url"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_confidentiality_status_endpoint_omits_raw_failure_reason(
     integration_client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

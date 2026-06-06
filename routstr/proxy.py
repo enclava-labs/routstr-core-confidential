@@ -322,18 +322,51 @@ def _public_provider_base_url(
     return base_url
 
 
-def _routstr_tee_attested_tls_boundary(value: object) -> bool:
+def _routstr_tee_attested_tls_boundary(
+    value: object,
+    *,
+    require_public_key_digest: bool = True,
+) -> bool:
     if not isinstance(value, dict):
         return False
+    public_key_digest = value.get("attested_tls_public_key_digest")
+    if require_public_key_digest:
+        public_key_digest_valid = is_full_sha256_digest(public_key_digest)
+    else:
+        public_key_digest_valid = public_key_digest is None or is_full_sha256_digest(
+            public_key_digest
+        )
     return (
         value.get("mode") == "attested-tls-termination"
         and value.get("tls_terminates_in_attested_tee") is True
         and value.get("inbound_ehbp_ohttp_request_decryption") is False
-        and is_full_sha256_digest(value.get("attested_tls_public_key_digest"))
+        and public_key_digest_valid
     )
 
 
-def _routstr_tee_public_status_has_proof(
+def _fresh_routstr_tee_local_verification(
+    value: dict[str, Any], attestation_evidence_digest: object
+) -> dict[str, Any] | None:
+    local_verification = value.get("local_verification")
+    if not isinstance(local_verification, dict):
+        return None
+    if local_verification.get("verified") is not True:
+        return None
+    verified_at = local_verification.get("verified_at")
+    expires_at = local_verification.get("expires_at")
+    if type(verified_at) is not int or type(expires_at) is not int:
+        return None
+    now = int(time.time())
+    if verified_at > now or expires_at <= now:
+        return None
+    if local_verification.get("evidence_digest") != attestation_evidence_digest:
+        return None
+    if not is_full_sha256_digest(local_verification.get("verified_claims_digest")):
+        return None
+    return local_verification
+
+
+def _routstr_tee_public_status_has_hpke_proof(
     value: dict[str, Any],
     *,
     client_confidentiality: dict[str, Any],
@@ -348,21 +381,10 @@ def _routstr_tee_public_status_has_proof(
     ):
         return False
 
-    local_verification = value.get("local_verification")
-    if not isinstance(local_verification, dict):
-        return False
-    if local_verification.get("verified") is not True:
-        return False
-    verified_at = local_verification.get("verified_at")
-    expires_at = local_verification.get("expires_at")
-    if type(verified_at) is not int or type(expires_at) is not int:
-        return False
-    now = int(time.time())
-    if verified_at > now or expires_at <= now:
-        return False
-    if local_verification.get("evidence_digest") != attestation_evidence_digest:
-        return False
-    if not is_full_sha256_digest(local_verification.get("verified_claims_digest")):
+    local_verification = _fresh_routstr_tee_local_verification(
+        value, attestation_evidence_digest
+    )
+    if local_verification is None:
         return False
 
     proof_claims = local_verification.get("proof_claims")
@@ -380,19 +402,84 @@ def _routstr_tee_public_status_has_proof(
     return True
 
 
+def _routstr_tee_public_status_has_cap_proof(value: dict[str, Any]) -> bool:
+    attestation_evidence_digest = value.get("attestation_evidence_digest")
+    if not is_full_sha256_digest(attestation_evidence_digest):
+        return False
+
+    local_verification = _fresh_routstr_tee_local_verification(
+        value, attestation_evidence_digest
+    )
+    if local_verification is None:
+        return False
+    if local_verification.get("verifier") != "cap-attestation-proxy":
+        return False
+
+    proof_claims = local_verification.get("proof_claims")
+    if not isinstance(proof_claims, dict):
+        return False
+    if proof_claims.get("attestation_document_format") != "cap-attestation-proxy-status":
+        return False
+    if proof_claims.get("cap_claims_verified") is not True:
+        return False
+    if proof_claims.get("cap_state") != "unlocked":
+        return False
+    if proof_claims.get("client_confidentiality_boundary") != "attested-tls-termination":
+        return False
+    if proof_claims.get("tls_terminates_in_attested_tee") is not True:
+        return False
+    for claim in (
+        "cap_attestation_url",
+        "cap_claims_instance_id",
+        "cap_status_url",
+        "cap_tee_domain",
+        "cap_tenant_id",
+    ):
+        if _public_string(proof_claims.get(claim)) is None:
+            return False
+    for url_claim in ("cap_attestation_url", "cap_status_url"):
+        claim_url = _public_string(proof_claims.get(url_claim))
+        if claim_url is None or urlsplit(claim_url).scheme != "https":
+            return False
+    if proof_claims.get("cap_status_digest") != attestation_evidence_digest:
+        return False
+    if not is_full_sha256_digest(proof_claims.get("routstr_config_measurement")):
+        return False
+    verification_steps = proof_claims.get("verification_steps")
+    if not isinstance(verification_steps, dict):
+        return False
+    for step in (
+        "cap_status_verified",
+        "cap_claims_verified",
+        "cap_state_unlocked",
+        "tls_terminates_in_attested_tee",
+        "freshness",
+    ):
+        if verification_steps.get(step) is not True:
+            return False
+    return True
+
+
 def _safe_public_routstr_tee_status(value: object) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     status = dict(value)
     if status.get("ready") is True:
         client_confidentiality = status.get("client_confidentiality")
-        if not _routstr_tee_attested_tls_boundary(client_confidentiality) or not (
+        hpke_ready = _routstr_tee_attested_tls_boundary(
+            client_confidentiality
+        ) and (
             isinstance(client_confidentiality, dict)
-            and _routstr_tee_public_status_has_proof(
+            and _routstr_tee_public_status_has_hpke_proof(
                 status,
                 client_confidentiality=client_confidentiality,
             )
-        ):
+        )
+        cap_ready = _routstr_tee_attested_tls_boundary(
+            client_confidentiality,
+            require_public_key_digest=False,
+        ) and _routstr_tee_public_status_has_cap_proof(status)
+        if not (hpke_ready or cap_ready):
             status["ready"] = False
     return status
 
