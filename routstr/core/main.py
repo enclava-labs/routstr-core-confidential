@@ -3,6 +3,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -294,15 +295,63 @@ def _safe_info_client_confidentiality(value: object) -> dict[str, Any] | None:
     }
 
 
+def _safe_info_public_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _local_tee_status_has_info_cap_proof(
+    proof_claims: dict[str, Any],
+    *,
+    attestation_evidence_digest: object,
+) -> bool:
+    if proof_claims.get("attestation_document_format") != "cap-attestation-proxy-status":
+        return False
+    if proof_claims.get("cap_claims_verified") is not True:
+        return False
+    if proof_claims.get("cap_state") != "unlocked":
+        return False
+    if proof_claims.get("client_confidentiality_boundary") != "attested-tls-termination":
+        return False
+    if proof_claims.get("tls_terminates_in_attested_tee") is not True:
+        return False
+    for claim in (
+        "cap_attestation_url",
+        "cap_claims_instance_id",
+        "cap_status_url",
+        "cap_tee_domain",
+        "cap_tenant_id",
+    ):
+        if _safe_info_public_string(proof_claims.get(claim)) is None:
+            return False
+    for url_claim in ("cap_attestation_url", "cap_status_url"):
+        claim_url = _safe_info_public_string(proof_claims.get(url_claim))
+        if claim_url is None or urlsplit(claim_url).scheme != "https":
+            return False
+    if proof_claims.get("cap_status_digest") != attestation_evidence_digest:
+        return False
+    if not is_full_sha256_digest(proof_claims.get("routstr_config_measurement")):
+        return False
+    verification_steps = proof_claims.get("verification_steps")
+    if not isinstance(verification_steps, dict):
+        return False
+    for step in (
+        "cap_status_verified",
+        "cap_claims_verified",
+        "cap_state_unlocked",
+        "tls_terminates_in_attested_tee",
+        "freshness",
+    ):
+        if verification_steps.get(step) is not True:
+            return False
+    return True
+
+
 def _local_tee_status_has_info_proof(value: dict[str, Any]) -> bool:
     attestation_evidence_digest = value.get("attestation_evidence_digest")
-    hpke_key_config_digest = value.get("hpke_key_config_digest")
-    hpke_public_key_digest = value.get("hpke_public_key_digest")
-    if not (
-        is_full_sha256_digest(attestation_evidence_digest)
-        and is_full_sha256_digest(hpke_key_config_digest)
-        and is_full_sha256_digest(hpke_public_key_digest)
-    ):
+    if not is_full_sha256_digest(attestation_evidence_digest):
         return False
 
     local_verification = value.get("local_verification")
@@ -327,10 +376,23 @@ def _local_tee_status_has_info_proof(value: dict[str, Any]) -> bool:
         return False
 
     proof_claims = local_verification.get("proof_claims")
-    client_confidentiality = value.get("client_confidentiality")
-    if not isinstance(proof_claims, dict) or not isinstance(
-        client_confidentiality, dict
+    if not isinstance(proof_claims, dict):
+        return False
+    if local_verification.get("verifier") == "cap-attestation-proxy":
+        return _local_tee_status_has_info_cap_proof(
+            proof_claims,
+            attestation_evidence_digest=attestation_evidence_digest,
+        )
+
+    hpke_key_config_digest = value.get("hpke_key_config_digest")
+    hpke_public_key_digest = value.get("hpke_public_key_digest")
+    if not (
+        is_full_sha256_digest(hpke_key_config_digest)
+        and is_full_sha256_digest(hpke_public_key_digest)
     ):
+        return False
+    client_confidentiality = value.get("client_confidentiality")
+    if not isinstance(client_confidentiality, dict):
         return False
     return (
         proof_claims.get("hpke_key_config_digest") == hpke_key_config_digest

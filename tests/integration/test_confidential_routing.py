@@ -3873,9 +3873,11 @@ async def test_confidentiality_status_accepts_cap_attested_tls_boundary(
         attestation_response = await integration_client.get(
             "/.well-known/routstr-attestation"
         )
+        info_response = await integration_client.get("/v1/info")
 
     assert response.status_code == 200
     assert attestation_response.status_code == 200
+    assert info_response.status_code == 200
     data = response.json()
     routstr_tee = data["routstr_tee"]
     assert routstr_tee["required"] is True
@@ -3913,6 +3915,9 @@ async def test_confidentiality_status_accepts_cap_attested_tls_boundary(
     assert tee_statement["local_verification"]["proof_claims"][
         "cap_attestation_url"
     ] == tee_statement["cap_attestation"]["attestation_url"]
+    info_confidentiality = info_response.json()["confidentiality"]
+    assert info_confidentiality["routstr_tee"]["ready"] is True
+    assert info_confidentiality["end_to_end_ready"] is True
 
 
 @pytest.mark.integration
