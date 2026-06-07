@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 CAP_STATE_DATA_DIR = Path("/state/app-data")
-DEFAULT_EPHEMERAL_LOG_DIR = Path("/tmp/routstr/logs")
+DEFAULT_EPHEMERAL_LOG_DIR = Path("/run/enclava/routstr-logs")
 LEGACY_SQLITE_URL = "sqlite+aiosqlite:///keys.db"
 LEGACY_LOG_DIR = Path("logs")
 
