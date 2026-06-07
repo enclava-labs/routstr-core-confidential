@@ -54,6 +54,8 @@ from pythonjsonlogger import jsonlogger
 from rich.console import Console
 from rich.logging import RichHandler
 
+from .runtime_paths import resolve_log_dir
+
 # Only use RichHandler when stdout is a real TTY. In non-TTY contexts
 # (docker logs, pipes, CI) Rich pads every line to width and wraps long
 # records, producing visually-empty trailing whitespace and split records.
@@ -364,7 +366,7 @@ def should_enable_console_logging() -> bool:
 
 def get_log_dir() -> str:
     """Return the directory used for Routstr file logs."""
-    return os.environ.get("ROUTSTR_LOG_DIR", "logs") or "logs"
+    return str(resolve_log_dir())
 
 
 def setup_logging() -> None:

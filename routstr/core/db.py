@@ -1,5 +1,4 @@
 import json
-import os
 import pathlib
 import sqlite3
 import time
@@ -17,10 +16,11 @@ from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from .logging import get_logger
+from .runtime_paths import resolve_database_url
 
 logger = get_logger(__name__)
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
+DATABASE_URL = resolve_database_url()
 
 
 engine = create_async_engine(DATABASE_URL, echo=False)  # echo=True for debugging SQL
