@@ -33,6 +33,7 @@ from .attestation import (
     get_routstr_attestation_statement,
     read_routstr_hpke_key_config,
 )
+from .cap_config import seed_configured_api_key
 from .confidentiality_public import is_full_sha256_digest
 from .db import create_session, init_db, run_migrations
 from .exceptions import general_exception_handler, http_exception_handler
@@ -85,6 +86,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 from .db import reset_all_reserved_balances
 
                 await reset_all_reserved_balances(session)
+            await seed_configured_api_key(session)
 
         if not s.admin_password:
             logger.warning(
@@ -307,13 +309,19 @@ def _local_tee_status_has_info_cap_proof(
     *,
     attestation_evidence_digest: object,
 ) -> bool:
-    if proof_claims.get("attestation_document_format") != "cap-attestation-proxy-status":
+    if (
+        proof_claims.get("attestation_document_format")
+        != "cap-attestation-proxy-status"
+    ):
         return False
     if proof_claims.get("cap_claims_verified") is not True:
         return False
     if proof_claims.get("cap_state") != "unlocked":
         return False
-    if proof_claims.get("client_confidentiality_boundary") != "attested-tls-termination":
+    if (
+        proof_claims.get("client_confidentiality_boundary")
+        != "attested-tls-termination"
+    ):
         return False
     if proof_claims.get("tls_terminates_in_attested_tee") is not True:
         return False

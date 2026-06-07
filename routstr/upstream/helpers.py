@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import re
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
 from sqlmodel import select
 
 from ..core import get_logger
+from ..core.cap_config import read_cap_config_json, read_cap_config_text
 from ..core.db import AsyncSession, ModelRow, UpstreamProviderRow, create_session
 from ..core.logging import redact_sensitive_text, redact_url_userinfo
 from ..payment.models import Model
@@ -233,6 +235,7 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
     from ..core.settings import settings
 
     async with create_session() as session:
+        await _upsert_cap_configured_tinfoil_provider(session, settings)
         result = await session.exec(select(UpstreamProviderRow))
         existing_providers = result.all()
 
@@ -277,6 +280,78 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
         upstreams = [p for p in results if p is not None]
 
         return upstreams
+
+
+async def _upsert_cap_configured_tinfoil_provider(
+    session: AsyncSession, settings: "Settings"
+) -> bool:
+    api_key = read_cap_config_text("TINFOIL_API_KEY")
+    if not api_key:
+        return False
+
+    from . import upstream_provider_classes
+
+    provider_classes_by_type = {
+        cls.provider_type: cls
+        for cls in upstream_provider_classes  # type: ignore[attr-defined]
+    }
+    provider_class = provider_classes_by_type.get("tinfoil")
+    if provider_class is None:
+        logger.warning(
+            "CAP-configured Tinfoil provider ignored; provider class is missing"
+        )
+        return False
+
+    base_url = str(getattr(provider_class, "default_base_url", "") or "").strip()
+    if not base_url:
+        logger.warning("CAP-configured Tinfoil provider ignored; base URL is missing")
+        return False
+
+    provider_fee = getattr(settings, "upstream_provider_fee", 1.01)
+    if not _provider_fee_is_finite(provider_fee):
+        raise ValueError("UPSTREAM_PROVIDER_FEE must be a finite positive number")
+    provider_settings = read_cap_config_json("TINFOIL_PROVIDER_SETTINGS_JSON")
+    provider_settings_json = (
+        json.dumps(provider_settings, allow_nan=False) if provider_settings else None
+    )
+
+    result = await session.exec(
+        select(UpstreamProviderRow).where(
+            UpstreamProviderRow.provider_type == "tinfoil",
+            UpstreamProviderRow.base_url == base_url,
+        )
+    )
+    provider = result.first()
+    if provider is None:
+        provider = UpstreamProviderRow(
+            provider_type="tinfoil",
+            base_url=base_url,
+            api_key=api_key,
+            enabled=True,
+            provider_fee=float(provider_fee),
+            provider_settings=provider_settings_json,
+        )
+        session.add(provider)
+        await session.commit()
+        logger.info("Seeded CAP-configured Tinfoil provider")
+        return True
+
+    changed = False
+    updates = {
+        "api_key": api_key,
+        "enabled": True,
+        "provider_fee": float(provider_fee),
+        "provider_settings": provider_settings_json,
+    }
+    for field, value in updates.items():
+        if getattr(provider, field) != value:
+            setattr(provider, field, value)
+            changed = True
+    if changed:
+        session.add(provider)
+        await session.commit()
+        logger.info("Updated CAP-configured Tinfoil provider")
+    return changed
 
 
 def _configure_provider_confidentiality(
@@ -325,10 +400,7 @@ def _confidential_provider_identity_violation(
     default_base_url = _normalize_provider_base_url(
         str(metadata.get("default_base_url") or "")
     )
-    if (
-        metadata.get("fixed_base_url") is True
-        and base_url != default_base_url
-    ):
+    if metadata.get("fixed_base_url") is True and base_url != default_base_url:
         return f"Provider type {provider_type} requires base_url {default_base_url}"
 
     if provider_type == "privatemode":

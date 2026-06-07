@@ -10,6 +10,8 @@ from typing import Any
 from pydantic.v1 import BaseModel, BaseSettings, Field, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from .cap_config import read_cap_config_text
+
 
 class Settings(BaseSettings):
     class Config:
@@ -84,7 +86,9 @@ class Settings(BaseSettings):
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
     refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")
-    refund_sweep_ttl_seconds: int = Field(default=604800, env="REFUND_SWEEP_TTL_SECONDS")
+    refund_sweep_ttl_seconds: int = Field(
+        default=604800, env="REFUND_SWEEP_TTL_SECONDS"
+    )
 
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
@@ -103,9 +107,7 @@ class Settings(BaseSettings):
 
     # Discovery
     relays: list[str] = Field(default_factory=list, env="RELAYS")
-    enable_analytics_sharing: bool = Field(
-        default=True, env="ENABLE_ANALYTICS_SHARING"
-    )
+    enable_analytics_sharing: bool = Field(default=True, env="ENABLE_ANALYTICS_SHARING")
 
     # Routing policy
     # disabled: normal cheapest/fallback routing
@@ -242,8 +244,16 @@ def _compute_primary_mint(cashu_mints: list[str]) -> str:
     return cashu_mints[0] if cashu_mints else "https://mint.minibits.cash/Bitcoin"
 
 
+def _apply_cap_config_settings(base: Settings) -> Settings:
+    if not base.admin_password:
+        if admin_password := read_cap_config_text("ADMIN_PASSWORD"):
+            base.admin_password = admin_password
+    return base
+
+
 def resolve_bootstrap() -> Settings:
     base = Settings()  # Reads env with custom parse_env_var
+    base = _apply_cap_config_settings(base)
     # Back-compat env mapping
     try:
         # Map MODEL_BASED_PRICING -> fixed_pricing (inverted)
