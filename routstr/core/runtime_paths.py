@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 CAP_STATE_DATA_DIR = Path("/state/app-data")
+DEFAULT_EPHEMERAL_LOG_DIR = Path("/tmp/routstr/logs")
 LEGACY_SQLITE_URL = "sqlite+aiosqlite:///keys.db"
 LEGACY_LOG_DIR = Path("logs")
 
@@ -54,13 +55,20 @@ def resolve_log_dir(
     *,
     cap_state_data_dir: Path = CAP_STATE_DATA_DIR,
 ) -> Path:
-    """Return the directory used for Routstr file logs."""
+    """Return the directory used for Routstr file logs.
+
+    CAP deployments keep application state durable under /state/app-data, but
+    request logging is synchronous. Keep default logs off the encrypted state
+    mount so state I/O stalls cannot block every app route before handlers run.
+    Operators can still opt into durable logs with ROUTSTR_LOG_DIR.
+    """
     env = os.environ if environ is None else environ
     explicit = _env_value(env, "ROUTSTR_LOG_DIR")
     if explicit:
         return Path(explicit)
 
-    data_dir = resolve_data_dir(env, cap_state_data_dir=cap_state_data_dir)
-    if data_dir == Path("."):
+    if cap_state_data_dir.is_dir() or _env_value(env, "ROUTSTR_DATA_DIR"):
+        return DEFAULT_EPHEMERAL_LOG_DIR
+    if resolve_data_dir(env, cap_state_data_dir=cap_state_data_dir) == Path("."):
         return LEGACY_LOG_DIR
-    return data_dir / "logs"
+    return DEFAULT_EPHEMERAL_LOG_DIR

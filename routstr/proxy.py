@@ -240,11 +240,7 @@ def _public_string(value: object) -> str | None:
 def _public_string_list(value: object) -> list[str]:
     if not isinstance(value, (list, tuple, set)):
         return []
-    return [
-        item.strip()
-        for item in value
-        if isinstance(item, str) and item.strip()
-    ]
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
 def _is_loopback_hostname(hostname: str | None) -> bool:
@@ -262,9 +258,7 @@ def _is_loopback_hostname(hostname: str | None) -> bool:
 def _url_has_private_path(value: str) -> bool:
     parsed = urlsplit(value)
     return any(
-        segment.lower() == "private"
-        for segment in parsed.path.split("/")
-        if segment
+        segment.lower() == "private" for segment in parsed.path.split("/") if segment
     )
 
 
@@ -394,9 +388,8 @@ def _routstr_tee_public_status_has_hpke_proof(
         return False
     if proof_claims.get("hpke_public_key_digest") != hpke_public_key_digest:
         return False
-    if (
-        proof_claims.get("public_key_digest")
-        != client_confidentiality.get("attested_tls_public_key_digest")
+    if proof_claims.get("public_key_digest") != client_confidentiality.get(
+        "attested_tls_public_key_digest"
     ):
         return False
     return True
@@ -418,13 +411,19 @@ def _routstr_tee_public_status_has_cap_proof(value: dict[str, Any]) -> bool:
     proof_claims = local_verification.get("proof_claims")
     if not isinstance(proof_claims, dict):
         return False
-    if proof_claims.get("attestation_document_format") != "cap-attestation-proxy-status":
+    if (
+        proof_claims.get("attestation_document_format")
+        != "cap-attestation-proxy-status"
+    ):
         return False
     if proof_claims.get("cap_claims_verified") is not True:
         return False
     if proof_claims.get("cap_state") != "unlocked":
         return False
-    if proof_claims.get("client_confidentiality_boundary") != "attested-tls-termination":
+    if (
+        proof_claims.get("client_confidentiality_boundary")
+        != "attested-tls-termination"
+    ):
         return False
     if proof_claims.get("tls_terminates_in_attested_tee") is not True:
         return False
@@ -466,9 +465,7 @@ def _safe_public_routstr_tee_status(value: object) -> dict[str, Any] | None:
     status = dict(value)
     if status.get("ready") is True:
         client_confidentiality = status.get("client_confidentiality")
-        hpke_ready = _routstr_tee_attested_tls_boundary(
-            client_confidentiality
-        ) and (
+        hpke_ready = _routstr_tee_attested_tls_boundary(client_confidentiality) and (
             isinstance(client_confidentiality, dict)
             and _routstr_tee_public_status_has_hpke_proof(
                 status,
@@ -816,19 +813,19 @@ def _public_confidentiality_status(
     currently_verified: bool | None = None,
     public_policy: dict[str, Any] | None = None,
     include_verified_claims: bool = False,
+    include_validation_claims: bool = False,
 ) -> dict[str, Any]:
     """Return public provider attestation status without raw verifier data."""
     # Compatibility no-op: public diagnostics expose digests and audited proof_claims,
     # never raw verifier output.
+    del include_verified_claims
     status_dict = status.dict()
 
     def public_string_list(value: object) -> list[str]:
         if not isinstance(value, (list, tuple, set)):
             return []
         return [
-            item.strip()
-            for item in value
-            if isinstance(item, str) and item.strip()
+            item.strip() for item in value if isinstance(item, str) and item.strip()
         ]
 
     def strict_public_string_list(value: object) -> list[str] | None:
@@ -928,7 +925,7 @@ def _public_confidentiality_status(
                 return status_dict
             status_dict["verified_claims_digest"] = verified_claims_digest
             status_dict["proof_claims"] = proof_claims
-            if include_verified_claims:
+            if include_validation_claims:
                 status_dict["_verified_claims_for_validation"] = verified_claims
     return status_dict
 
@@ -1078,6 +1075,7 @@ def get_confidentiality_status(
     include_provider_urls: bool = False,
     include_provider_policy: bool = True,
     include_verified_claims: bool = False,
+    include_validation_claims: bool = False,
     include_routstr_tee: bool = True,
     routstr_tee_ready_override: bool | None = None,
 ) -> dict[str, Any]:
@@ -1101,6 +1099,7 @@ def get_confidentiality_status(
             currently_verified=has_current_confidential_verification(upstream),
             public_policy=public_policy,
             include_verified_claims=include_verified_claims,
+            include_validation_claims=include_validation_claims,
         )
         provider_status: dict[str, Any] = {
             "provider_type": provider_type,
@@ -1377,8 +1376,7 @@ async def proxy(
             if provider_requires_known_model_endpoint(upstream)
         ]
         if confidential_routing_required() or (
-            endpoint_gated_upstreams
-            and len(endpoint_gated_upstreams) == len(upstreams)
+            endpoint_gated_upstreams and len(endpoint_gated_upstreams) == len(upstreams)
         ):
             return create_error_response(
                 "unsupported_endpoint",

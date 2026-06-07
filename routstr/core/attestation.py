@@ -423,13 +423,11 @@ def _public_provider_base_url(
             )
         )
     if (
-        provider_type == "tinfoil"
-        or confidentiality_mode == "tinfoil"
+        provider_type == "tinfoil" or confidentiality_mode == "tinfoil"
     ) and _normalized_base_url(base_url) != "https://inference.tinfoil.sh/v1":
         return None
     if (
-        provider_type == "privatemode"
-        or confidentiality_mode == "privatemode"
+        provider_type == "privatemode" or confidentiality_mode == "privatemode"
     ) and not is_privatemode_loopback:
         return None
     return base_url
@@ -446,7 +444,7 @@ def _routing_policy_snapshot(
         "include_routstr_tee": False,
     }
     if routstr_tee_ready is True:
-        status_kwargs["include_verified_claims"] = True
+        status_kwargs["include_validation_claims"] = True
         status_kwargs["routstr_tee_ready_override"] = True
     status = proxy_module.get_confidentiality_status(**status_kwargs)
     routable_with_full_attestation = _safe_routable_with_full_attestation(
@@ -601,7 +599,9 @@ def _validated_cap_status_url() -> str:
 
 
 def _public_cap_base_url() -> str | None:
-    raw_url = str(getattr(settings, "routstr_tee_cap_public_base_url", "") or "").strip()
+    raw_url = str(
+        getattr(settings, "routstr_tee_cap_public_base_url", "") or ""
+    ).strip()
     if raw_url:
         parsed = urlsplit(raw_url)
         if parsed.scheme != "https" or not parsed.hostname:
@@ -1259,9 +1259,7 @@ def _cap_routstr_tee_verification_failure(status: dict[str, Any]) -> str | None:
             "be attested-tls-termination"
         )
     if verified_claims.get("tls_terminates_in_attested_tee") is not True:
-        return (
-            "CAP Routstr TEE verification must attest TLS termination in the TEE"
-        )
+        return "CAP Routstr TEE verification must attest TLS termination in the TEE"
     for claim in (
         "cap_attestation_url",
         "cap_claims_instance_id",
@@ -1283,8 +1281,7 @@ def _cap_routstr_tee_verification_failure(status: dict[str, Any]) -> str | None:
             )
     if verified_claims.get("cap_status_digest") != status.get("evidence_digest"):
         return (
-            "CAP Routstr TEE verification cap_status_digest must match "
-            "evidence_digest"
+            "CAP Routstr TEE verification cap_status_digest must match evidence_digest"
         )
     if verification_steps_failure := _routstr_tee_verification_steps_failure(
         verified_claims.get("verification_steps"),
@@ -1446,7 +1443,10 @@ def _required_local_proxy_binary_artifacts(
 ) -> dict[str, set[str]]:
     if not isinstance(routing_policy, dict):
         return {}
-    if routing_policy.get("mode") != "required" or routing_policy.get("required") is not True:
+    if (
+        routing_policy.get("mode") != "required"
+        or routing_policy.get("required") is not True
+    ):
         return {}
     providers = routing_policy.get("providers")
     if not isinstance(providers, list):
@@ -1545,15 +1545,21 @@ def _validate_required_local_artifacts(
     claims: dict[str, Any],
     routing_policy: dict[str, Any] | None,
 ) -> None:
-    required_local_proxy_digests = _required_local_proxy_binary_artifacts(routing_policy)
+    required_local_proxy_digests = _required_local_proxy_binary_artifacts(
+        routing_policy
+    )
     if not required_local_proxy_digests:
         return
 
     local_artifacts = claims.get("attested_local_artifacts")
     if not isinstance(local_artifacts, dict):
         first_artifact_claim = sorted(required_local_proxy_digests)[0]
-        raise ValueError(f"attested_local_artifacts.{first_artifact_claim} claim is required")
-    for artifact_claim, required_digests in sorted(required_local_proxy_digests.items()):
+        raise ValueError(
+            f"attested_local_artifacts.{first_artifact_claim} claim is required"
+        )
+    for artifact_claim, required_digests in sorted(
+        required_local_proxy_digests.items()
+    ):
         if len(required_digests) != 1:
             raise ValueError(
                 f"attested_local_artifacts.{artifact_claim} has conflicting routing policy digests"
@@ -1913,7 +1919,9 @@ def _generate_routstr_tee_attestation_document(
         expected_format = ""
     else:
         expected_format = raw_expected_format.strip()
-    result_format = raw_result_format.strip() if isinstance(raw_result_format, str) else ""
+    result_format = (
+        raw_result_format.strip() if isinstance(raw_result_format, str) else ""
+    )
     if not expected_format:
         raise ValueError("Routstr TEE attestation document format is not configured")
     if result_format != expected_format:
@@ -2196,9 +2204,7 @@ def _tee_evidence() -> dict[str, Any]:
                 {
                     "available": True,
                     "evidence_format": "cap-attestation-proxy-status",
-                    "attestation_evidence_digest": cap_attestation.get(
-                        "status_digest"
-                    ),
+                    "attestation_evidence_digest": cap_attestation.get("status_digest"),
                     "attestation_source": "cap-attestation-proxy",
                     "self_verified": True,
                     "failure_reason": None,
