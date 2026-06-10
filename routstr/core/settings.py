@@ -177,6 +177,10 @@ class Settings(BaseSettings):
         default=2.0,
         env="ROUTSTR_TEE_CAP_STATUS_TIMEOUT_SECONDS",
     )
+    routstr_tee_cap_status_cache_seconds: float = Field(
+        default=30.0,
+        env="ROUTSTR_TEE_CAP_STATUS_CACHE_SECONDS",
+    )
     routstr_tee_cap_tee_domain: str = Field(
         default="", env="ROUTSTR_TEE_CAP_TEE_DOMAIN"
     )

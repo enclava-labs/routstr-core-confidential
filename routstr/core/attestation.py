@@ -86,6 +86,7 @@ PUBLIC_ROUTSTR_TEE_PROOF_CLAIMS = (
     "verification_steps",
 )
 DEFAULT_ROUTSTR_TEE_VERIFIER_MAX_AGE_SECONDS = 300
+DEFAULT_CAP_STATUS_CACHE_SECONDS = 30.0
 CONFIDENTIAL_PROVIDER_MODES = {
     "tinfoil": "tinfoil",
     "ppq-private": "ppq-private-tee",
@@ -97,6 +98,7 @@ ROUTABLE_FULL_ATTESTATION_PROVIDERS = (
     "privatemode",
 )
 CLIENT_CONFIDENTIALITY_BOUNDARY_ATTESTED_TLS = "attested-tls-termination"
+_CAP_ATTESTATION_STATUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _canonical_json(value: object) -> bytes:
@@ -571,6 +573,23 @@ def _cap_status_timeout_seconds() -> float:
     return max(0.1, min(timeout, 10.0))
 
 
+def _cap_status_cache_seconds() -> float:
+    raw_seconds = getattr(
+        settings,
+        "routstr_tee_cap_status_cache_seconds",
+        DEFAULT_CAP_STATUS_CACHE_SECONDS,
+    )
+    try:
+        seconds = float(raw_seconds)
+    except (TypeError, ValueError):
+        return DEFAULT_CAP_STATUS_CACHE_SECONDS
+    return max(0.0, min(seconds, 300.0))
+
+
+def _clear_cap_attestation_status_cache() -> None:
+    _CAP_ATTESTATION_STATUS_CACHE.clear()
+
+
 def _cap_attestation_enabled() -> bool:
     return bool(getattr(settings, "routstr_tee_cap_attestation_enabled", False))
 
@@ -627,6 +646,14 @@ def _cap_tee_domain() -> str | None:
 
 def _fetch_cap_attestation_status() -> dict[str, Any]:
     url = _validated_cap_status_url()
+    cache_seconds = _cap_status_cache_seconds()
+    now = time.monotonic()
+    cached = _CAP_ATTESTATION_STATUS_CACHE.get(url)
+    if cached is not None:
+        cached_at, cached_status = cached
+        if cache_seconds > 0 and now - cached_at <= cache_seconds:
+            return dict(cached_status)
+
     request = Request(url, headers={"Accept": "application/json"})
     try:
         with urlopen(request, timeout=_cap_status_timeout_seconds()) as response:
@@ -647,6 +674,8 @@ def _fetch_cap_attestation_status() -> dict[str, Any]:
         raise ValueError(f"CAP attestation status is not valid JSON: {exc}") from exc
     if not isinstance(status, dict):
         raise ValueError("CAP attestation status must be a JSON object")
+    if cache_seconds > 0:
+        _CAP_ATTESTATION_STATUS_CACHE[url] = (now, dict(status))
     return status
 
 

@@ -13,6 +13,7 @@ import pytest
 
 from routstr.core.attestation import (
     _accepted_routstr_tee_verification,
+    _clear_cap_attestation_status_cache,
     _private_local_artifacts_snapshot,
     _routstr_tee_report_data_digest,
     _routstr_tee_report_data_hex,
@@ -4530,6 +4531,63 @@ def test_routstr_tee_attestation_command_rejects_non_string_document_format(
     assert "attestation_document_format must be a string" in str(
         readiness["failure_reason"] or ""
     )
+
+
+def test_cap_attestation_status_is_cached_for_request_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_cap_attestation_status_cache()
+    status_payload = {
+        "claims_error": None,
+        "claims_instance_id": "routstr-core-prod",
+        "claims_verified": True,
+        "config_ready": True,
+        "error": None,
+        "instance_id": "cap-org-routstr-core-prod",
+        "mode": "password",
+        "state": "unlocked",
+        "tenant_id": "cap-org-routstr-core-prod",
+        "tenant_instance_identity_hash": "a" * 64,
+    }
+    calls = 0
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, limit: int = -1) -> bytes:
+            return json.dumps(status_payload).encode("utf-8")
+
+    def fake_urlopen(*args: object, **kwargs: object) -> FakeResponse:
+        nonlocal calls
+        calls += 1
+        return FakeResponse()
+
+    monkeypatch.setattr(settings, "routstr_tee_cap_attestation_enabled", True)
+    monkeypatch.setattr(
+        settings, "routstr_tee_cap_status_url", "http://127.0.0.1:8081/status"
+    )
+    monkeypatch.setattr(settings, "routstr_tee_cap_tee_domain", "example.tee.test")
+    monkeypatch.setattr(settings, "routstr_tee_cap_public_base_url", "")
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_client_confidentiality_boundary",
+        "attested-tls-termination",
+    )
+    monkeypatch.setattr("routstr.core.attestation.urlopen", fake_urlopen)
+
+    try:
+        first = get_routstr_tee_readiness()
+        second = get_routstr_tee_readiness()
+
+        assert first["ready"] is True
+        assert second["ready"] is True
+        assert calls == 1
+    finally:
+        _clear_cap_attestation_status_cache()
 
 
 def test_routstr_tee_attestation_command_rejects_secret_argv_before_execution(
