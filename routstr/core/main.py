@@ -49,6 +49,67 @@ setup_logging()
 logger = get_logger(__name__)
 
 
+def _startup_dependency_timeout_seconds() -> float:
+    raw_timeout = getattr(global_settings, "startup_dependency_timeout_seconds", 45.0)
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        return 45.0
+    return max(0.1, min(timeout, 300.0))
+
+
+def _log_startup_dependency_done(name: str, task: "asyncio.Task[Any]") -> None:
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception as exc:
+        logger.error(
+            "Startup dependency failed",
+            extra={
+                "dependency": name,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+        )
+    else:
+        logger.info("Startup dependency completed", extra={"dependency": name})
+
+
+async def _await_startup_dependencies(
+    tasks: dict[str, "asyncio.Task[Any]"],
+    *,
+    timeout_seconds: float | None = None,
+) -> list["asyncio.Task[Any]"]:
+    """Wait briefly for startup dependencies without blocking API readiness."""
+    if not tasks:
+        return []
+
+    timeout = (
+        _startup_dependency_timeout_seconds()
+        if timeout_seconds is None
+        else max(0.0, timeout_seconds)
+    )
+    for name, task in tasks.items():
+        task.add_done_callback(
+            lambda completed, dependency=name: _log_startup_dependency_done(
+                dependency,
+                completed,
+            )
+        )
+
+    _, pending_set = await asyncio.wait(tasks.values(), timeout=timeout)
+    pending: list[asyncio.Task[Any]] = []
+    for name, task in tasks.items():
+        if task in pending_set:
+            logger.warning(
+                "Startup dependency still running; continuing startup fail-closed",
+                extra={"dependency": name, "timeout_seconds": timeout},
+            )
+            pending.append(task)
+    return pending
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Application startup initiated", extra={"version": __version__})
@@ -66,6 +127,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     refund_sweep_task = None
     routstr_fee_task = None
     invoice_watcher_task = None
+    startup_dependency_tasks: list[asyncio.Task[Any]] = []
 
     try:
         # Apply litellm-wide settings (drop_params, chat-completions URL,
@@ -106,13 +168,15 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         from ..proxy import get_upstreams
         from ..upstream.helpers import refresh_upstreams_models_periodically
 
-        _update_prices_task = asyncio.create_task(_update_prices())
-        _initialize_upstreams_task = asyncio.create_task(initialize_upstreams())
+        startup_dependencies = {
+            "update_prices": asyncio.create_task(_update_prices()),
+            "initialize_upstreams": asyncio.create_task(initialize_upstreams()),
+        }
+        startup_dependency_tasks = list(startup_dependencies.values())
 
-        # ensure both setup tasks complete
-        await asyncio.gather(
-            _update_prices_task, _initialize_upstreams_task, return_exceptions=True
-        )
+        # Prefer a warmed model/pricing snapshot, but never let an external
+        # provider, verifier, or network dependency keep the API socket wedged.
+        await _await_startup_dependencies(startup_dependencies)
 
         btc_price_task = asyncio.create_task(update_prices_periodically())
         pricing_task = asyncio.create_task(update_sats_pricing())
@@ -176,9 +240,15 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             routstr_fee_task.cancel()
         if invoice_watcher_task is not None:
             invoice_watcher_task.cancel()
+        for task in startup_dependency_tasks:
+            if not task.done():
+                task.cancel()
 
         try:
             tasks_to_wait = []
+            for task in startup_dependency_tasks:
+                if not task.done():
+                    tasks_to_wait.append(task)
             if btc_price_task is not None:
                 tasks_to_wait.append(btc_price_task)
             if pricing_task is not None:

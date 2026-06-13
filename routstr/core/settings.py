@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     # Discovery
     relays: list[str] = Field(default_factory=list, env="RELAYS")
     enable_analytics_sharing: bool = Field(default=True, env="ENABLE_ANALYTICS_SHARING")
+    startup_dependency_timeout_seconds: float = Field(
+        default=45.0, env="STARTUP_DEPENDENCY_TIMEOUT_SECONDS"
+    )
 
     # Routing policy
     # disabled: normal cheapest/fallback routing
