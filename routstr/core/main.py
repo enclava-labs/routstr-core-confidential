@@ -47,6 +47,7 @@ from .version import __version__
 # Initialize logging first
 setup_logging()
 logger = get_logger(__name__)
+INFO_CONFIDENTIALITY_TIMEOUT_SECONDS = 2.0
 
 
 def _startup_dependency_timeout_seconds() -> float:
@@ -526,6 +527,57 @@ def _safe_info_confidentiality_summary(value: object) -> dict[str, Any] | None:
     return summary
 
 
+def _info_confidentiality_required() -> bool:
+    mode = str(getattr(global_settings, "confidential_routing_mode", "") or "")
+    return mode.strip().lower() in {"required", "require", "strict", "enforced"}
+
+
+def _failed_info_confidentiality_summary() -> dict[str, Any] | None:
+    if not _info_confidentiality_required():
+        return None
+    mode = str(getattr(global_settings, "confidential_routing_mode", "") or "")
+    mode = mode.strip().lower() or "required"
+    return {
+        "mode": mode,
+        "required": True,
+        "end_to_end_ready": False,
+        "routable_with_full_attestation": _empty_info_routable_with_full_attestation(),
+        "routstr_tee": {
+            "required": bool(
+                getattr(global_settings, "routstr_tee_attestation_required", False)
+            ),
+            "ready": False,
+            "client_confidentiality": {
+                "mode": "attested-tls-termination",
+                "tls_terminates_in_attested_tee": True,
+                "inbound_ehbp_ohttp_request_decryption": False,
+            },
+        },
+    }
+
+
+async def _info_confidentiality_summary() -> dict[str, Any] | None:
+    try:
+        from ..proxy import get_confidentiality_status
+
+        raw_status = await asyncio.wait_for(
+            asyncio.to_thread(get_confidentiality_status),
+            timeout=INFO_CONFIDENTIALITY_TIMEOUT_SECONDS,
+        )
+        return _safe_info_confidentiality_summary(raw_status)
+    except TimeoutError:
+        logger.warning(
+            "Timed out collecting /v1/info confidentiality summary",
+            extra={"timeout_seconds": INFO_CONFIDENTIALITY_TIMEOUT_SECONDS},
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to collect /v1/info confidentiality summary",
+            extra={"error": str(exc), "error_type": type(exc).__name__},
+        )
+    return _failed_info_confidentiality_summary()
+
+
 @app.get("/v1/info")
 async def info() -> dict:
     response = {
@@ -538,14 +590,9 @@ async def info() -> dict:
         "onion_url": global_settings.onion_url,
         "child_key_cost_msats": global_settings.child_key_cost,
     }
-    try:
-        from ..proxy import get_confidentiality_status
-
-        confidentiality = _safe_info_confidentiality_summary(
-            get_confidentiality_status()
-        )
-    except Exception:
-        confidentiality = None
+    confidentiality = await _info_confidentiality_summary()
+    if confidentiality is None:
+        confidentiality = _failed_info_confidentiality_summary()
     if confidentiality is not None and (
         confidentiality["required"] is True
         or any(confidentiality["routable_with_full_attestation"].values())
