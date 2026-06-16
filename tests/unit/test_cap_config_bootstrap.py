@@ -1,11 +1,16 @@
 from pathlib import Path
 
 from routstr.core.cap_config import (
+    DEFAULT_CAP_CONFIG_DIR,
     configured_api_key,
     configured_api_key_balance_msats,
     read_cap_config_json,
     read_cap_config_text,
 )
+
+
+def test_default_cap_config_dir_matches_encrypted_cap_app_data_volume() -> None:
+    assert DEFAULT_CAP_CONFIG_DIR == Path("/state/app-data/.enclava/config")
 
 
 def test_reads_cap_config_files(tmp_path: Path) -> None:

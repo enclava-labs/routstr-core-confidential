@@ -12,7 +12,7 @@ from .logging import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_CAP_CONFIG_DIR = Path("/state/.enclava/config")
+DEFAULT_CAP_CONFIG_DIR = Path("/state/app-data/.enclava/config")
 DEFAULT_BOOTSTRAP_API_KEY_BALANCE_MSATS = 1_000_000_000
 
 
