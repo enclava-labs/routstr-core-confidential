@@ -98,7 +98,7 @@ ROUTABLE_FULL_ATTESTATION_PROVIDERS = (
     "privatemode",
 )
 CLIENT_CONFIDENTIALITY_BOUNDARY_ATTESTED_TLS = "attested-tls-termination"
-_CAP_ATTESTATION_STATUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_CAP_ATTESTATION_STATUS_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _canonical_json(value: object) -> bytes:
@@ -586,8 +586,74 @@ def _cap_status_cache_seconds() -> float:
     return max(0.0, min(seconds, 300.0))
 
 
+def _cap_verifier_max_age_seconds() -> int:
+    max_age = getattr(settings, "routstr_tee_cap_verifier_max_age_seconds", 300)
+    try:
+        max_age = int(max_age)
+    except (TypeError, ValueError):
+        max_age = 300
+    return max(1, min(max_age, 3600))
+
+
 def _clear_cap_attestation_status_cache() -> None:
     _CAP_ATTESTATION_STATUS_CACHE.clear()
+
+
+def _cached_cap_attestation_status(
+    url: str,
+    *,
+    now_monotonic: float | None = None,
+    now_wall: int | None = None,
+    allow_stale_on_failure: bool = False,
+) -> dict[str, Any] | None:
+    cached = _CAP_ATTESTATION_STATUS_CACHE.get(url)
+    if not isinstance(cached, dict):
+        return None
+    status = cached.get("status")
+    status_digest = cached.get("status_digest")
+    monotonic_at = cached.get("monotonic_at")
+    observed_at = cached.get("status_observed_at")
+    if (
+        not isinstance(status, dict)
+        or not _is_prefixed_sha256_digest_value(status_digest)
+        or type(monotonic_at) is not float
+        or type(observed_at) is not int
+    ):
+        return None
+
+    if allow_stale_on_failure:
+        now_wall = int(time.time()) if now_wall is None else now_wall
+        if observed_at > now_wall:
+            return None
+        if now_wall - observed_at > _cap_verifier_max_age_seconds():
+            return None
+    else:
+        now_monotonic = time.monotonic() if now_monotonic is None else now_monotonic
+        cache_seconds = _cap_status_cache_seconds()
+        if cache_seconds <= 0 or now_monotonic - monotonic_at > cache_seconds:
+            return None
+
+    return {
+        "status": dict(status),
+        "status_digest": status_digest,
+        "status_observed_at": observed_at,
+    }
+
+
+def _store_cap_attestation_status_cache(
+    url: str,
+    *,
+    status: dict[str, Any],
+    status_digest: str,
+    observed_at: int,
+    monotonic_at: float,
+) -> None:
+    _CAP_ATTESTATION_STATUS_CACHE[url] = {
+        "status": dict(status),
+        "status_digest": status_digest,
+        "status_observed_at": observed_at,
+        "monotonic_at": monotonic_at,
+    }
 
 
 def _cap_attestation_enabled() -> bool:
@@ -646,14 +712,6 @@ def _cap_tee_domain() -> str | None:
 
 def _fetch_cap_attestation_status() -> dict[str, Any]:
     url = _validated_cap_status_url()
-    cache_seconds = _cap_status_cache_seconds()
-    now = time.monotonic()
-    cached = _CAP_ATTESTATION_STATUS_CACHE.get(url)
-    if cached is not None:
-        cached_at, cached_status = cached
-        if cache_seconds > 0 and now - cached_at <= cache_seconds:
-            return dict(cached_status)
-
     request = Request(url, headers={"Accept": "application/json"})
     try:
         with urlopen(request, timeout=_cap_status_timeout_seconds()) as response:
@@ -674,8 +732,6 @@ def _fetch_cap_attestation_status() -> dict[str, Any]:
         raise ValueError(f"CAP attestation status is not valid JSON: {exc}") from exc
     if not isinstance(status, dict):
         raise ValueError("CAP attestation status must be a JSON object")
-    if cache_seconds > 0:
-        _CAP_ATTESTATION_STATUS_CACHE[url] = (now, dict(status))
     return status
 
 
@@ -720,6 +776,7 @@ def _cap_status_failure(status: dict[str, Any]) -> str | None:
 def _cap_attestation_status_evidence() -> dict[str, Any]:
     base_url = _public_cap_base_url()
     tee_domain = _cap_tee_domain()
+    local_status_url = None
     status_url = f"{base_url}/status" if base_url else None
     attestation_url = f"{base_url}/attestation" if base_url else None
     base: dict[str, Any] = {
@@ -742,19 +799,53 @@ def _cap_attestation_status_evidence() -> dict[str, Any]:
         return base
 
     try:
+        local_status_url = _validated_cap_status_url()
+    except Exception as exc:
+        base["failure_reason"] = str(exc)
+        return base
+
+    now_monotonic = time.monotonic()
+    now_wall = int(time.time())
+    cached = _cached_cap_attestation_status(
+        local_status_url,
+        now_monotonic=now_monotonic,
+    )
+    if cached is not None:
+        base.update(cached)
+        base["available"] = True
+        return base
+
+    try:
         status = _fetch_cap_attestation_status()
     except Exception as exc:
+        cached = _cached_cap_attestation_status(
+            local_status_url,
+            now_wall=now_wall,
+            allow_stale_on_failure=True,
+        )
+        if cached is not None:
+            base.update(cached)
+            base["available"] = True
+            return base
         base["failure_reason"] = str(exc)
         return base
 
     safe_status = _safe_cap_attestation_status(status)
     base["status"] = safe_status
     base["status_digest"] = _sha256_json(safe_status)
+    base["status_observed_at"] = now_wall
     if failure := _cap_status_failure(safe_status):
         base["failure_reason"] = failure
         return base
 
     base["available"] = True
+    _store_cap_attestation_status_cache(
+        local_status_url,
+        status=safe_status,
+        status_digest=cast(str, base["status_digest"]),
+        observed_at=now_wall,
+        monotonic_at=now_monotonic,
+    )
     return base
 
 
@@ -806,12 +897,14 @@ def _verify_cap_routstr_tee_evidence(
         )
 
     now = int(time.time())
-    max_age = getattr(settings, "routstr_tee_cap_verifier_max_age_seconds", 300)
-    try:
-        max_age = int(max_age)
-    except (TypeError, ValueError):
-        max_age = 300
-    max_age = max(1, min(max_age, 3600))
+    max_age = _cap_verifier_max_age_seconds()
+    observed_at = cap.get("status_observed_at")
+    if type(observed_at) is not int:
+        observed_at = now
+    if observed_at > now or now - observed_at > max_age:
+        return _unverified_routstr_tee_verification(
+            "CAP attestation proxy status evidence is stale"
+        )
     routing_policy_digest = _sha256_json(routing_policy)
     verified_claims = {
         "attestation_document_format": "cap-attestation-proxy-status",
@@ -839,8 +932,8 @@ def _verify_cap_routstr_tee_evidence(
     return {
         "verified": True,
         "verifier": "cap-attestation-proxy",
-        "verified_at": now,
-        "expires_at": now + max_age,
+        "verified_at": observed_at,
+        "expires_at": observed_at + max_age,
         "failure_reason": None,
         "evidence_digest": cast(str, status_digest),
         "verified_claims": verified_claims,

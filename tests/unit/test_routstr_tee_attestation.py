@@ -269,9 +269,7 @@ def _ppq_private_provider_proof_claims(policy_digest: str) -> dict[str, object]:
         "repo": "ppq-ai/private-tee",
         "attestation_bundle_url_digest": _json_digest("https://api.ppq.ai/private"),
         "attested_hpke_public_key_hex": "b" * 64,
-        "code_measurement_fingerprint": _named_digest(
-            "ppq-provider-code-measurement"
-        ),
+        "code_measurement_fingerprint": _named_digest("ppq-provider-code-measurement"),
         "enclave_measurement_fingerprint": _named_digest(
             "ppq-provider-enclave-measurement"
         ),
@@ -476,9 +474,7 @@ def test_routstr_tee_verifier_rejects_non_string_code_measurement_policy_entries
         )
 
 
-def test_routstr_tee_verifier_rejects_blank_code_measurement_policy_alias() -> (
-    None
-):
+def test_routstr_tee_verifier_rejects_blank_code_measurement_policy_alias() -> None:
     verifier_result = {
         "verified": True,
         "verifier": "unit-test-routstr-tee-verifier",
@@ -1637,9 +1633,9 @@ def test_public_routstr_tee_status_publishes_client_confidentiality_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     public_key = "-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----"
-    public_key_digest = "sha256:" + hashlib.sha256(
-        public_key.encode("utf-8")
-    ).hexdigest()
+    public_key_digest = (
+        "sha256:" + hashlib.sha256(public_key.encode("utf-8")).hexdigest()
+    )
     monkeypatch.setattr(settings, "routstr_attestation_public_key", public_key)
     monkeypatch.setattr(settings, "routstr_attestation_public_key_path", "")
     monkeypatch.setattr(
@@ -1989,9 +1985,12 @@ def test_routstr_attestation_statement_binds_client_confidentiality_boundary(
     monkeypatch.setattr(settings, "routstr_attestation_public_key_path", "")
 
     statement = get_routstr_attestation_statement()
-    public_key_digest = "sha256:" + hashlib.sha256(
-        b"-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----"
-    ).hexdigest()
+    public_key_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            b"-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----"
+        ).hexdigest()
+    )
 
     assert statement["routing_policy"]["client_confidentiality"] == {
         "mode": "attested-tls-termination",
@@ -2136,7 +2135,9 @@ def test_routstr_attestation_statement_downgrades_missing_client_confidentiality
 
     statement = get_routstr_attestation_statement()
 
-    assert statement["routing_policy"]["client_confidentiality"]["mode"] == "unspecified"
+    assert (
+        statement["routing_policy"]["client_confidentiality"]["mode"] == "unspecified"
+    )
     assert statement["tee"]["local_verification"]["verified"] is False
     assert "failure_reason_digest" in statement["tee"]["local_verification"]
 
@@ -2721,7 +2722,9 @@ def test_routstr_attestation_statement_binds_provider_public_proof_claims(
     assert confidentiality["proof_claims"] == provider_proof_claims
 
 
-def test_safe_provider_confidentiality_accepts_runtime_provider_evidence_digest() -> None:
+def test_safe_provider_confidentiality_accepts_runtime_provider_evidence_digest() -> (
+    None
+):
     provider_proof_claims = _provider_proof_claims()
     confidentiality_policy = {
         "repo": "tinfoilsh/confidential-model-router",
@@ -2748,7 +2751,8 @@ def test_safe_provider_confidentiality_accepts_runtime_provider_evidence_digest(
         {
             key: value
             for key, value in runtime_claims.items()
-            if key not in {
+            if key
+            not in {
                 "payload_evidence_digest",
                 "payload_policy_digest",
                 "payload_verification_nonce",
@@ -2792,9 +2796,7 @@ def test_routstr_attestation_statement_accepts_ppq_raw_policy_digest_with_public
         "repo": "ppq-ai/private-tee",
         "attestation_bundle_url": "https://api.ppq.ai/private",
         "release_digest": _named_digest("ppq-provider-release"),
-        "code_measurement_fingerprint": _named_digest(
-            "ppq-provider-code-measurement"
-        ),
+        "code_measurement_fingerprint": _named_digest("ppq-provider-code-measurement"),
         "enclave_measurement_fingerprint": _named_digest(
             "ppq-provider-enclave-measurement"
         ),
@@ -2810,9 +2812,7 @@ def test_routstr_attestation_statement_accepts_ppq_raw_policy_digest_with_public
         "repo": "ppq-ai/private-tee",
         "attestation_bundle_url_digest": _json_digest("https://api.ppq.ai/private"),
         "release_digest": _named_digest("ppq-provider-release"),
-        "code_measurement_fingerprint": _named_digest(
-            "ppq-provider-code-measurement"
-        ),
+        "code_measurement_fingerprint": _named_digest("ppq-provider-code-measurement"),
         "enclave_measurement_fingerprint": _named_digest(
             "ppq-provider-enclave-measurement"
         ),
@@ -3155,7 +3155,9 @@ def test_routstr_attestation_statement_downgrades_malformed_present_proof_alias(
     assert "proof_claims" not in confidentiality
 
 
-def test_routstr_attestation_provider_confidentiality_rejects_non_list_model_selectors() -> None:
+def test_routstr_attestation_provider_confidentiality_rejects_non_list_model_selectors() -> (
+    None
+):
     public_status = _safe_provider_confidentiality(
         {
             "enabled": True,
@@ -3681,7 +3683,9 @@ def test_routstr_tee_verifier_requires_concrete_proof_artifacts() -> None:
         )
 
 
-def test_routstr_tee_verifier_requires_privatemode_proxy_inside_attested_runtime() -> None:
+def test_routstr_tee_verifier_requires_privatemode_proxy_inside_attested_runtime() -> (
+    None
+):
     routing_policy = {
         "mode": "required",
         "required": True,
@@ -3736,7 +3740,9 @@ def test_routstr_tee_verifier_requires_privatemode_proxy_inside_attested_runtime
         )
 
 
-def test_routstr_tee_verifier_accepts_ppq_private_without_local_proxy_artifact() -> None:
+def test_routstr_tee_verifier_accepts_ppq_private_without_local_proxy_artifact() -> (
+    None
+):
     routing_policy = {
         "mode": "required",
         "required": True,
@@ -3848,7 +3854,9 @@ def test_routstr_tee_verifier_rejects_placeholder_local_proxy_policy_pin() -> No
         )
 
 
-def test_routstr_tee_verifier_accepts_privatemode_proxy_attested_runtime_binding() -> None:
+def test_routstr_tee_verifier_accepts_privatemode_proxy_attested_runtime_binding() -> (
+    None
+):
     routing_policy = {
         "mode": "required",
         "required": True,
@@ -4586,6 +4594,82 @@ def test_cap_attestation_status_is_cached_for_request_path(
         assert first["ready"] is True
         assert second["ready"] is True
         assert calls == 1
+    finally:
+        _clear_cap_attestation_status_cache()
+
+
+def test_cap_attestation_status_cache_survives_transient_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_cap_attestation_status_cache()
+    now_wall = 1_800_000_000
+    now_monotonic = 5_000.0
+    calls = 0
+    status_payload = {
+        "claims_error": None,
+        "claims_instance_id": "routstr-core-prod",
+        "claims_verified": True,
+        "config_ready": True,
+        "error": None,
+        "instance_id": "cap-org-routstr-core-prod",
+        "mode": "password",
+        "state": "unlocked",
+        "tenant_id": "cap-org-routstr-core-prod",
+        "tenant_instance_identity_hash": "a" * 64,
+    }
+
+    def fake_fetch() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return status_payload
+        raise TimeoutError("status endpoint stalled")
+
+    monkeypatch.setattr(settings, "confidential_routing_mode", "required")
+    monkeypatch.setattr(settings, "routstr_tee_attestation_required", True)
+    monkeypatch.setattr(settings, "routstr_tee_cap_attestation_enabled", True)
+    monkeypatch.setattr(settings, "routstr_tee_cap_verifier_max_age_seconds", 300)
+    monkeypatch.setattr(settings, "routstr_tee_cap_status_cache_seconds", 30.0)
+    monkeypatch.setattr(
+        settings, "routstr_tee_cap_status_url", "http://127.0.0.1:8081/status"
+    )
+    monkeypatch.setattr(settings, "routstr_tee_cap_tee_domain", "example.tee.test")
+    monkeypatch.setattr(settings, "routstr_tee_cap_public_base_url", "")
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_client_confidentiality_boundary",
+        "attested-tls-termination",
+    )
+    monkeypatch.setattr(
+        "routstr.core.attestation._fetch_cap_attestation_status", fake_fetch
+    )
+    monkeypatch.setattr("routstr.core.attestation.time.time", lambda: now_wall)
+    monkeypatch.setattr(
+        "routstr.core.attestation.time.monotonic", lambda: now_monotonic
+    )
+
+    try:
+        first = get_routstr_tee_readiness()
+
+        assert first["ready"] is True
+        assert first["local_verification"]["verified_at"] == now_wall
+
+        now_wall += 60
+        now_monotonic += 60
+        second = get_routstr_tee_readiness()
+
+        assert calls == 2
+        assert second["ready"] is True
+        assert second["failure_reason"] is None
+        assert second["local_verification"]["verified_at"] == 1_800_000_000
+        assert second["local_verification"]["expires_at"] == 1_800_000_300
+
+        now_wall = 1_800_000_301
+        now_monotonic += 241
+        expired = get_routstr_tee_readiness()
+
+        assert expired["ready"] is False
+        assert "status endpoint stalled" in str(expired["failure_reason"])
     finally:
         _clear_cap_attestation_status_cache()
 
