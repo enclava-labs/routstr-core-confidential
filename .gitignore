@@ -2,6 +2,7 @@ __pycache__
 .env
 keys.db
 wallet.sqlite3
+.wallet/
 
 # Python build artifacts
 *.egg-info/

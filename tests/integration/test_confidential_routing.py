@@ -87,16 +87,12 @@ def _tinfoil_model_attestations_for_model_ids(
         model_id: {
             "repo": f"tinfoilsh/confidential-{model_id.rsplit('/', 1)[-1]}",
             "attestation_format": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
-            "attestation_report_digest": _digest(
-                f"{model_id}:attestation-report"
-            ),
+            "attestation_report_digest": _digest(f"{model_id}:attestation-report"),
             "attested_hpke_public_key_hex": _hex(f"{model_id}:hpke-public-key"),
             "enclave_measurement_fingerprint": _digest(
                 f"{model_id}:enclave-measurement"
             ),
-            "code_measurement_fingerprint": _digest(
-                f"{model_id}:code-measurement"
-            ),
+            "code_measurement_fingerprint": _digest(f"{model_id}:code-measurement"),
             "release_digest": _digest(f"{model_id}:release"),
             "tls_public_key_fingerprint_sha256": _digest(f"{model_id}:tls-key"),
             "verification_steps": _ehbp_verification_steps(),
@@ -266,9 +262,7 @@ def _provider_verified_claims_for_mode(mode: str) -> dict[str, object]:
         "payload_policy_digest": VALID_POLICY_DIGEST,
         "payload_evidence_digest": VALID_EVIDENCE_DIGEST,
         "attested_hpke_public_key_hex": _hex("provider-hpke-public-key"),
-        "enclave_measurement_fingerprint": _digest(
-            "provider-enclave-measurement"
-        ),
+        "enclave_measurement_fingerprint": _digest("provider-enclave-measurement"),
         "code_measurement_fingerprint": _digest("provider-code-measurement"),
         "verification_steps": _ehbp_verification_steps(),
     }
@@ -318,7 +312,10 @@ def _bind_local_confidentiality_policy(
             if model_ids is not None
             else list(getattr(status, "model_ids", []))
         )
-        if local_policy is None and getattr(provider, "provider_type", None) == "tinfoil":
+        if (
+            local_policy is None
+            and getattr(provider, "provider_type", None) == "tinfoil"
+        ):
             if isinstance(selected_model_ids, list) and all(
                 isinstance(model_id, str) and model_id.strip()
                 for model_id in selected_model_ids
@@ -392,8 +389,8 @@ def _mark_provider_verified(
         verified_claims["proxy_base_url"] = provider.base_url
         policy = _privatemode_policy_for_model_ids(selected_model_ids)
     elif mode == "tinfoil":
-        verified_claims["model_attestations"] = _tinfoil_model_attestations_for_model_ids(
-            selected_model_ids
+        verified_claims["model_attestations"] = (
+            _tinfoil_model_attestations_for_model_ids(selected_model_ids)
         )
         policy = _tinfoil_policy_for_model_ids(selected_model_ids)
     selected_prefixes = model_id_prefixes or []
@@ -3570,9 +3567,7 @@ async def test_confidentiality_status_endpoint_exposes_public_provider_proof_cla
             "model_attestation_targets": {
                 "tinfoil/gpt-secure": {
                     "repo": "tinfoilsh/confidential-gpt-secure",
-                    "expected_release_digest": _digest(
-                        "tinfoil/gpt-secure:release"
-                    ),
+                    "expected_release_digest": _digest("tinfoil/gpt-secure:release"),
                     "expected_code_measurement_fingerprint": _digest(
                         "tinfoil/gpt-secure:code-measurement"
                     ),
@@ -3659,9 +3654,7 @@ async def test_confidentiality_status_endpoint_exposes_public_provider_proof_cla
         "payload_evidence_digest": VALID_EVIDENCE_DIGEST,
         "release_digest": _digest("status-tinfoil-router-release"),
         "repo": "tinfoilsh/confidential-model-router",
-        "tls_public_key_fingerprint_sha256": _digest(
-            "status-tinfoil-router-tls-key"
-        ),
+        "tls_public_key_fingerprint_sha256": _digest("status-tinfoil-router-tls-key"),
         "transport": "ehbp",
         "model_attestations": _tinfoil_model_attestations_for_model_ids(
             ["tinfoil/gpt-secure"]
@@ -3749,9 +3742,12 @@ async def test_confidentiality_status_endpoint_includes_redacted_routstr_tee_sta
     assert response.status_code == 200
     data = response.json()
     routstr_tee = data["routstr_tee"]
-    public_key_digest = "sha256:" + hashlib.sha256(
-        b"-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----"
-    ).hexdigest()
+    public_key_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            b"-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----"
+        ).hexdigest()
+    )
     assert routstr_tee["required"] is True
     assert routstr_tee["ready"] is True
     assert routstr_tee["client_confidentiality"] == {
@@ -3765,13 +3761,12 @@ async def test_confidentiality_status_endpoint_includes_redacted_routstr_tee_sta
     assert routstr_tee["local_verification"]["verified_claims_digest"].startswith(
         "sha256:"
     )
-    assert (
-        routstr_tee["local_verification"]["proof_claims"]
-        == _expected_local_tee_public_proof_claims(
-            hpke_key_config_digest=routstr_tee["hpke_key_config_digest"],
-            hpke_public_key_digest=routstr_tee["hpke_public_key_digest"],
-            public_key_digest=public_key_digest,
-        )
+    assert routstr_tee["local_verification"][
+        "proof_claims"
+    ] == _expected_local_tee_public_proof_claims(
+        hpke_key_config_digest=routstr_tee["hpke_key_config_digest"],
+        hpke_public_key_digest=routstr_tee["hpke_public_key_digest"],
+        public_key_digest=public_key_digest,
     )
     assert "verified_claims" not in routstr_tee["local_verification"]
 
@@ -3909,26 +3904,101 @@ async def test_confidentiality_status_accepts_cap_attested_tls_boundary(
         "privatemode": [],
     }
     assert routing_provider["confidentiality"]["verified"] is True
-    assert routing_provider["confidentiality"]["proof_claims"][
-        "model_attestations"
-    ]["tinfoil/gpt-secure"]["release_digest"].startswith("sha256:")
+    assert routing_provider["confidentiality"]["proof_claims"]["model_attestations"][
+        "tinfoil/gpt-secure"
+    ]["release_digest"].startswith("sha256:")
     tee_statement = attestation_statement["tee"]
     assert tee_statement["evidence_format"] == "cap-attestation-proxy-status"
     assert tee_statement["attestation_source"] == "cap-attestation-proxy"
-    assert tee_statement["attestation_evidence_digest"] == (
-        routstr_tee["attestation_evidence_digest"]
+    assert (
+        tee_statement["attestation_evidence_digest"]
+        == (routstr_tee["attestation_evidence_digest"])
     )
     assert tee_statement["cap_attestation"]["available"] is True
     assert tee_statement["cap_attestation"]["attestation_url"] == (
         "https://routstr-core.example.tee.enclava.dev/.well-known/confidential/"
         "attestation"
     )
-    assert tee_statement["local_verification"]["proof_claims"][
-        "cap_attestation_url"
-    ] == tee_statement["cap_attestation"]["attestation_url"]
+    assert (
+        tee_statement["local_verification"]["proof_claims"]["cap_attestation_url"]
+        == tee_statement["cap_attestation"]["attestation_url"]
+    )
     info_confidentiality = info_response.json()["confidentiality"]
     assert info_confidentiality["routstr_tee"]["ready"] is True
     assert info_confidentiality["end_to_end_ready"] is True
+
+
+def test_cap_attestation_status_reuses_fresh_verified_cache_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from routstr.core import attestation as attestation_module
+
+    now = 1_800_000_000
+    calls = 0
+
+    def cap_status() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "claims_verified": True,
+                "state": "unlocked",
+                "mode": "password",
+                "tenant_id": "cap-test-org-routstr-core",
+                "claims_instance_id": "routstr-core",
+                "instance_id": "cap-test-org-routstr-core-routstr-core",
+                "error": None,
+                "claims_error": None,
+            }
+        raise TimeoutError("status endpoint stalled")
+
+    monkeypatch.setattr(settings, "confidential_routing_mode", "required")
+    monkeypatch.setattr(settings, "routstr_tee_attestation_required", True)
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_client_confidentiality_boundary",
+        "attested-tls-termination",
+    )
+    monkeypatch.setattr(settings, "routstr_attestation_document_path", "")
+    monkeypatch.setattr(settings, "routstr_attestation_document_format", "")
+    monkeypatch.setattr(settings, "routstr_attestation_public_key", "")
+    monkeypatch.setattr(settings, "routstr_attestation_public_key_path", "")
+    monkeypatch.setattr(settings, "routstr_attestation_hpke_key_config_b64", "")
+    monkeypatch.setattr(settings, "routstr_attestation_hpke_key_config_path", "")
+    monkeypatch.setattr(settings, "routstr_tee_cap_attestation_enabled", True)
+    monkeypatch.setattr(settings, "routstr_tee_cap_verifier_max_age_seconds", 300)
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_cap_tee_domain",
+        "routstr-core.example.tee.enclava.dev",
+    )
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_cap_public_base_url",
+        "https://routstr-core.example.tee.enclava.dev/.well-known/confidential",
+    )
+    monkeypatch.setattr(attestation_module, "_fetch_cap_attestation_status", cap_status)
+    monkeypatch.setattr(attestation_module.time, "time", lambda: now)
+    attestation_module._clear_cap_attestation_status_cache()
+
+    first = attestation_module.get_routstr_tee_readiness()
+
+    assert first["ready"] is True
+    assert first["local_verification"]["verified_at"] == now
+
+    now += 5
+    second = attestation_module.get_routstr_tee_readiness()
+
+    assert second["ready"] is True
+    assert second["failure_reason"] is None
+    assert second["local_verification"]["verified_at"] == 1_800_000_000
+    assert second["local_verification"]["expires_at"] == 1_800_000_300
+
+    now = 1_800_000_301
+    expired = attestation_module.get_routstr_tee_readiness()
+
+    assert expired["ready"] is False
+    assert "status endpoint stalled" in expired["failure_reason"]
 
 
 @pytest.mark.integration
@@ -4017,8 +4087,7 @@ async def test_admin_confidentiality_status_exposes_redacted_failure_reason(
     data = response.json()
     confidentiality = data["providers"][0]["confidentiality"]
     assert confidentiality["failure_reason"] == (
-        "verifier failed with api_key: [REDACTED] "
-        "and raw_prompt: [REDACTED]"
+        "verifier failed with api_key: [REDACTED] and raw_prompt: [REDACTED]"
     )
     assert confidentiality["policy_digest"] == VALID_POLICY_DIGEST
     assert confidentiality["verified_claims_present"] is True
@@ -4049,7 +4118,9 @@ async def test_models_endpoint_exposes_public_confidentiality_metadata(
         "routstr_tee_client_confidentiality_boundary",
         "attested-tls-termination",
     )
-    monkeypatch.setattr(settings, "routstr_attestation_document_path", str(evidence_path))
+    monkeypatch.setattr(
+        settings, "routstr_attestation_document_path", str(evidence_path)
+    )
     monkeypatch.setattr(settings, "routstr_attestation_document_format", "tdx_quote")
     _configure_routstr_tee_attestation_stub(monkeypatch)
     monkeypatch.setattr(
@@ -4147,9 +4218,12 @@ async def test_models_endpoint_exposes_public_confidentiality_metadata(
 
     assert response.status_code == 200
     data = response.json()
-    public_key_digest = "sha256:" + hashlib.sha256(
-        b"-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----"
-    ).hexdigest()
+    public_key_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            b"-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----"
+        ).hexdigest()
+    )
     assert data["routstr_tee"]["required"] is True
     assert data["routstr_tee"]["ready"] is True
     assert data["routstr_tee"]["client_confidentiality"] == {
@@ -5108,13 +5182,12 @@ async def test_routstr_attestation_statement_omits_raw_local_verifier_claims(
         == data["tee"]["attestation_evidence_digest"]
     )
     assert local_verification["verified_claims_digest"].startswith("sha256:")
-    assert (
-        local_verification["proof_claims"]
-        == _expected_local_tee_public_proof_claims(
-            hpke_key_config_digest=data["tee"]["hpke_key_config"]["key_config_digest"],
-            hpke_public_key_digest=data["tee"]["hpke_key_config"]["public_key_digest"],
-            public_key_digest=data["tee"]["public_key_digest"],
-        )
+    assert local_verification[
+        "proof_claims"
+    ] == _expected_local_tee_public_proof_claims(
+        hpke_key_config_digest=data["tee"]["hpke_key_config"]["key_config_digest"],
+        hpke_public_key_digest=data["tee"]["hpke_key_config"]["public_key_digest"],
+        public_key_digest=data["tee"]["public_key_digest"],
     )
     assert "verified_claims" not in local_verification
 

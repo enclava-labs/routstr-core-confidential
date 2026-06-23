@@ -2,6 +2,8 @@ module github.com/routstr/routstr-core/verifiers/tinfoil-go
 
 go 1.25.9
 
+toolchain go1.26.4
+
 require github.com/tinfoilsh/tinfoil-go v0.12.10
 
 require (

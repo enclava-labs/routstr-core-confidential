@@ -50,6 +50,18 @@ export function CollectModelsDialog({
     errors: string[];
   } | null>(null);
 
+  const loadProviders = useCallback(async () => {
+    setIsLoadingProviders(true);
+    try {
+      const data = await AdminService.getUpstreamProviders();
+      setProviders(data);
+    } catch {
+      toast.error('Failed to load providers');
+    } finally {
+      setIsLoadingProviders(false);
+    }
+  }, []);
+
   const loadRemoteModels = useCallback(async () => {
     if (!selectedProvider) return;
 
@@ -75,25 +87,13 @@ export function CollectModelsDialog({
     if (isOpen) {
       loadProviders();
     }
-  }, [isOpen]);
+  }, [isOpen, loadProviders]);
 
   useEffect(() => {
     if (selectedProvider) {
       loadRemoteModels();
     }
   }, [selectedProvider, loadRemoteModels]);
-
-  const loadProviders = async () => {
-    setIsLoadingProviders(true);
-    try {
-      const data = await AdminService.getUpstreamProviders();
-      setProviders(data);
-    } catch {
-      toast.error('Failed to load providers');
-    } finally {
-      setIsLoadingProviders(false);
-    }
-  };
 
   const toggleModel = (modelId: string) => {
     const newSelected = new Set(selectedModels);

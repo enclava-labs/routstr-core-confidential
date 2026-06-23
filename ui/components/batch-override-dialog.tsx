@@ -15,6 +15,8 @@ import { toast } from 'sonner';
 import { AdminService } from '@/lib/api/services/admin';
 import { Loader2, Database } from 'lucide-react';
 
+const SAMPLE_MODEL_CREATED_AT = 1700000000;
+
 export interface BatchOverrideDialogProps {
   providerId: number;
   isOpen: boolean;
@@ -37,7 +39,7 @@ export function BatchOverrideDialog({
         id: 'model-id-1',
         name: 'Model Name 1',
         description: 'Description...',
-        created: Math.floor(Date.now() / 1000),
+        created: SAMPLE_MODEL_CREATED_AT,
         context_length: 8192,
         architecture: {
           modality: 'text',

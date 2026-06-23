@@ -448,14 +448,29 @@ async def _seed_providers_from_settings(
         ("PERPLEXITY_API_KEY", "perplexity", None, None),
         ("FIREWORKS_API_KEY", "fireworks", None, None),
         ("XAI_API_KEY", "xai", None, None),
+        ("TINFOIL_API_KEY", "tinfoil", None, None),
+        ("PPQ_PRIVATE_API_KEY", "ppq-private", "PPQ_PRIVATE_BASE_URL", None),
+        ("PPQ_API_KEY", "ppq-private", "PPQ_PRIVATE_BASE_URL", None),
+        ("PRIVATEMODE_API_KEY", "privatemode", "PRIVATEMODE_PROXY_URL", None),
     ]
 
-    for env_key, provider_type, _, _ in env_mappings:
+    for env_key, provider_type, base_url_env_key, fallback_base_url in env_mappings:
         api_key = os.environ.get(env_key)
         if api_key and provider_type in provider_classes_by_type:
             provider_class = provider_classes_by_type[provider_type]
-            if provider_class.default_base_url:  # type: ignore[attr-defined]
-                base_url = provider_class.default_base_url  # type: ignore[attr-defined]
+            configured_base_url = (
+                os.environ.get(base_url_env_key, "").strip()
+                if base_url_env_key
+                else ""
+            )
+            base_url = (
+                configured_base_url
+                or fallback_base_url
+                or provider_class.default_base_url  # type: ignore[attr-defined]
+            )
+            if base_url:
+                if (base_url, api_key) in seeded_provider_keys:
+                    continue
                 result = await session.exec(
                     select(UpstreamProviderRow).where(
                         UpstreamProviderRow.base_url == base_url,

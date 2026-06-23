@@ -250,6 +250,39 @@ async def test_seed_providers_from_settings_preserves_configured_provider_fee(
 
 
 @pytest.mark.asyncio
+async def test_seed_providers_from_settings_adds_confidential_provider_env_vars(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TINFOIL_API_KEY", "sk-test-tinfoil")
+    monkeypatch.setenv("PPQ_API_KEY", "sk-test-ppq")
+    monkeypatch.setenv("PRIVATEMODE_API_KEY", "sk-test-privatemode")
+    monkeypatch.setenv("PRIVATEMODE_PROXY_URL", "http://127.0.0.1:18080/v1")
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _seed_providers_from_settings(
+            session,
+            Settings(upstream_provider_fee=1.23),
+        )
+        await session.commit()
+
+        result = await session.exec(select(UpstreamProviderRow))
+        providers = {provider.provider_type: provider for provider in result.all()}
+
+    assert providers["tinfoil"].base_url == "https://inference.tinfoil.sh/v1"
+    assert providers["tinfoil"].api_key == "sk-test-tinfoil"
+    assert providers["tinfoil"].provider_fee == 1.23
+    assert providers["ppq-private"].base_url == "https://api.ppq.ai/private/v1"
+    assert providers["ppq-private"].api_key == "sk-test-ppq"
+    assert providers["ppq-private"].provider_fee == 1.23
+    assert providers["privatemode"].base_url == "http://127.0.0.1:18080/v1"
+    assert providers["privatemode"].api_key == "sk-test-privatemode"
+    assert providers["privatemode"].provider_fee == 1.23
+
+
+@pytest.mark.asyncio
 async def test_payout_settings_persist_via_settings_service() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with AsyncSession(engine, expire_on_commit=False) as session:

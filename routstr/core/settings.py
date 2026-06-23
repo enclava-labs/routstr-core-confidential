@@ -13,6 +13,18 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from .cap_config import read_cap_config_text
 
 
+def load_dotenv_file() -> None:
+    """Load local .env values for non-container development runs."""
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        return
+    load_dotenv(override=False)
+
+
+load_dotenv_file()
+
+
 class Settings(BaseSettings):
     class Config:
         case_sensitive = True

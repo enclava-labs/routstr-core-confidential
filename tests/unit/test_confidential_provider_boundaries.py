@@ -7684,7 +7684,6 @@ async def test_privatemode_refresh_rejects_malformed_component_policy_before_ver
                     "proxy_binary_path": PRIVATEMODE_PROXY_BINARY_PATH,
                     "expected_workload_sans": PRIVATEMODE_EXPECTED_WORKLOAD_SANS,
                     "expected_trust_tier": PRIVATEMODE_TRUST_TIER,
-                    "expected_gpu_attestation_policy": PRIVATEMODE_GPU_ATTESTATION_POLICY,
                     "allowed_secret_service_measurements": [
                         PRIVATEMODE_SECRET_SERVICE_MEASUREMENT,
                         {"unexpected": "object"},
@@ -7755,7 +7754,6 @@ async def test_privatemode_refresh_rejects_conflicting_component_policy_before_v
                     "proxy_binary_path": PRIVATEMODE_PROXY_BINARY_PATH,
                     "expected_workload_sans": PRIVATEMODE_EXPECTED_WORKLOAD_SANS,
                     "expected_trust_tier": PRIVATEMODE_TRUST_TIER,
-                    "expected_gpu_attestation_policy": PRIVATEMODE_GPU_ATTESTATION_POLICY,
                     "expected_secret_service_measurement": (
                         PRIVATEMODE_SECRET_SERVICE_MEASUREMENT
                     ),
@@ -7866,7 +7864,6 @@ async def test_privatemode_refresh_rejects_component_claim_outside_policy(
                     "expected_ai_worker_measurement": (
                         PRIVATEMODE_AI_WORKER_MEASUREMENT
                     ),
-                    "expected_gpu_attestation_policy": "nvidia-ocsp-good-only",
                     "expected_key_release_binding": (
                         PRIVATEMODE_MODEL_WORKLOAD_KEY_RELEASE_BINDING
                     ),

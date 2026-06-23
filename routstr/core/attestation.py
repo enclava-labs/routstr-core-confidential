@@ -621,13 +621,13 @@ def _cached_cap_attestation_status(
     ):
         return None
 
-    if allow_stale_on_failure:
-        now_wall = int(time.time()) if now_wall is None else now_wall
-        if observed_at > now_wall:
-            return None
-        if now_wall - observed_at > _cap_verifier_max_age_seconds():
-            return None
-    else:
+    now_wall = int(time.time()) if now_wall is None else now_wall
+    if observed_at > now_wall:
+        return None
+    if now_wall - observed_at > _cap_verifier_max_age_seconds():
+        return None
+
+    if not allow_stale_on_failure:
         now_monotonic = time.monotonic() if now_monotonic is None else now_monotonic
         cache_seconds = _cap_status_cache_seconds()
         if cache_seconds <= 0 or now_monotonic - monotonic_at > cache_seconds:

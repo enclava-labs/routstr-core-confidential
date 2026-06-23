@@ -91,11 +91,7 @@ export function AdminSettings() {
   const [passwordError, setPasswordError] = useState<string>('');
   const [passwordSaving, setPasswordSaving] = useState(false);
 
-  useEffect(() => {
-    loadSettings();
-  }, []);
-
-  const loadSettings = async () => {
+  const loadSettings = React.useCallback(async () => {
     try {
       setLoading(true);
       setError('');
@@ -109,7 +105,11 @@ export function AdminSettings() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    loadSettings();
+  }, [loadSettings]);
 
   const handleSave = async () => {
     try {

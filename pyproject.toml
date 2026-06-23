@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 
 dependencies = [
-    "fastapi[standard]>=0.115",
+    "fastapi[standard]>=0.138.0",
     "aiosqlite>=0.20",
     "sqlmodel>=0.0.24",
     "httpx[socks]>=0.25.2",
@@ -20,7 +20,9 @@ dependencies = [
     "mdurl==0.1.2",
     "pillow>=10",
     "openai>=1.98.0",
-    "litellm>=1.55.0",
+    "litellm>=1.89.3",
+    "python-dotenv>=1.0",
+    "python-multipart>=0.0.32",
 ]
 
 [dependency-groups]
@@ -64,7 +66,7 @@ markers = [
 ]
 
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=78.1.1", "wheel>=0.46.2"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -83,6 +85,23 @@ check_untyped_defs = true
 disallow_untyped_calls = true
 disallow_incomplete_defs = true
 disallow_untyped_decorators = true
+
+[tool.uv]
+# cashu 0.20.1 is still the latest release and pins several vulnerable
+# runtime/build packages. Keep the override centralized until cashu relaxes
+# those caps or Routstr moves to a different Cashu client.
+exclude-dependencies = [
+    "ecdsa",
+]
+override-dependencies = [
+    "cryptography>=48.0.1",
+    "fastapi>=0.138.0",
+    "h11>=0.16.0",
+    "httpx>=0.28.0",
+    "importlib-metadata>=8.0.0",
+    "setuptools>=78.1.1",
+    "wheel>=0.46.2",
+]
 
 [tool.uv.sources]
 routstr = { workspace = true }

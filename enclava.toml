@@ -1,0 +1,33 @@
+[app]
+name = "routstr-confidential"
+port = 8000
+command = ["/usr/local/bin/routstr-cap-entrypoint"]
+
+[storage]
+paths = ["/app/data"]
+size = "10Gi"
+tls_size = "2Gi"
+
+[unlock]
+mode = "auto"
+
+[egress]
+allow = [
+  { host = "inference.tinfoil.sh", ports = [443] },
+  { host = "api.ppq.ai", ports = [443] },
+  { host = "api.github.com", ports = [443] },
+  { host = "github.com", ports = [443] },
+  { host = "ghcr.io", ports = [443] },
+  { host = "rekor.sigstore.dev", ports = [443] },
+  { host = "fulcio.sigstore.dev", ports = [443] },
+  { host = "tuf-repo-cdn.sigstore.dev", ports = [443] },
+]
+
+[resources]
+cpu = "1"
+memory = "2Gi"
+
+[health]
+path = "/health"
+interval = 30
+timeout = 5

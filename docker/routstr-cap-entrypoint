@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+set -eu
+
+: "${ROUTSTR_DATA_DIR:=/app/data}"
+: "${ROUTSTR_LOG_DIR:=${ROUTSTR_DATA_DIR}/logs}"
+: "${TMPDIR:=${ROUTSTR_DATA_DIR}/tmp}"
+: "${XDG_CACHE_HOME:=${ROUTSTR_DATA_DIR}/.cache}"
+: "${XDG_CONFIG_HOME:=${ROUTSTR_DATA_DIR}/.config}"
+: "${XDG_DATA_HOME:=${ROUTSTR_DATA_DIR}/.local/share}"
+: "${PORT:=8000}"
+
+export ROUTSTR_DATA_DIR
+export ROUTSTR_LOG_DIR
+export TMPDIR
+export XDG_CACHE_HOME
+export XDG_CONFIG_HOME
+export XDG_DATA_HOME
+export PORT
+
+mkdir -p \
+  "${ROUTSTR_DATA_DIR}" \
+  "${ROUTSTR_LOG_DIR}" \
+  "${TMPDIR}" \
+  "${XDG_CACHE_HOME}" \
+  "${XDG_CONFIG_HOME}" \
+  "${XDG_DATA_HOME}"
+
+exec /.venv/bin/fastapi run routstr --host 0.0.0.0 --port "${PORT}"

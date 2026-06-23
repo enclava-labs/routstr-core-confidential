@@ -2,6 +2,8 @@ module github.com/edgelesssys/continuum/routstr-privatemode-verifier
 
 go 1.26.0
 
+toolchain go1.26.4
+
 require (
 	github.com/edgelesssys/continuum v1.42.0
 	github.com/edgelesssys/contrast v1.20.0

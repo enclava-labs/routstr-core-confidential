@@ -2,6 +2,8 @@ module github.com/routstr/routstr-core/verifiers/routstr-tee-attest-go
 
 go 1.25.9
 
+toolchain go1.26.4
+
 require github.com/google/go-sev-guest v0.14.1
 
 require (
