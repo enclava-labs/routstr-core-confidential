@@ -1,6 +1,7 @@
 import asyncio
 import time
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any, AsyncGenerator
 from urllib.parse import urlsplit
@@ -59,7 +60,7 @@ def _startup_dependency_timeout_seconds() -> float:
     return max(0.1, min(timeout, 300.0))
 
 
-def _log_startup_dependency_done(name: str, task: "asyncio.Task[Any]") -> None:
+def _log_startup_dependency_done(name: str, task: "asyncio.Future[Any]") -> None:
     if task.cancelled():
         return
     try:
@@ -93,10 +94,7 @@ async def _await_startup_dependencies(
     )
     for name, task in tasks.items():
         task.add_done_callback(
-            lambda completed, dependency=name: _log_startup_dependency_done(
-                dependency,
-                completed,
-            )
+            partial(_log_startup_dependency_done, name)
         )
 
     _, pending_set = await asyncio.wait(tasks.values(), timeout=timeout)
@@ -599,6 +597,11 @@ async def info() -> dict:
     ):
         response["confidentiality"] = confidentiality
     return response
+
+
+@app.get("/health", include_in_schema=False)
+async def health() -> StarletteResponse:
+    return StarletteResponse(content="ok\n", media_type="text/plain")
 
 
 @app.get("/v1/providers")

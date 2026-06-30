@@ -340,7 +340,7 @@ setup:
 
 # Development server
 dev:
-    fastapi dev routstr --host 0.0.0.0
+    uvicorn routstr:fastapi_app --host 0.0.0.0 --port 8000 --reload
 
 # Testing
 test:

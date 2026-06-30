@@ -9,6 +9,7 @@ from typing import Optional
 from fastapi import HTTPException
 from sqlalchemy import case, func
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import col, select, update
 
 from .core import get_logger
@@ -39,7 +40,7 @@ def _reserved_balance_value(key: ApiKey) -> int:
     return key.reserved_balance or 0
 
 
-def _reserved_balance_column():
+def _reserved_balance_column() -> ColumnElement[int]:
     return func.coalesce(col(ApiKey.reserved_balance), 0)
 
 

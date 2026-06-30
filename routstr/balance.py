@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import func
+from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import col, select, update
 
 from .auth import get_billing_key, validate_bearer_key
@@ -33,7 +34,7 @@ def _reserved_balance_value(key: ApiKey) -> int:
     return key.reserved_balance or 0
 
 
-def _reserved_balance_column():
+def _reserved_balance_column() -> ColumnElement[int]:
     return func.coalesce(col(ApiKey.reserved_balance), 0)
 
 

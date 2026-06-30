@@ -4674,6 +4674,137 @@ def test_cap_attestation_status_cache_survives_transient_timeout(
         _clear_cap_attestation_status_cache()
 
 
+def test_cap_attestation_status_cache_is_cleared_after_fresh_failed_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_cap_attestation_status_cache()
+    now_wall = 1_800_000_000
+    now_monotonic = 5_000.0
+    calls = 0
+    verified_payload = {
+        "claims_error": None,
+        "claims_instance_id": "routstr-core-prod",
+        "claims_verified": True,
+        "config_ready": True,
+        "error": None,
+        "instance_id": "cap-org-routstr-core-prod",
+        "mode": "password",
+        "state": "unlocked",
+        "tenant_id": "cap-org-routstr-core-prod",
+        "tenant_instance_identity_hash": "a" * 64,
+    }
+
+    def fake_fetch() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return verified_payload
+        if calls == 2:
+            return {
+                **verified_payload,
+                "state": "locked",
+                "error": "cap proxy returned private diagnostic",
+            }
+        raise TimeoutError("status endpoint stalled")
+
+    monkeypatch.setattr(settings, "confidential_routing_mode", "required")
+    monkeypatch.setattr(settings, "routstr_tee_attestation_required", True)
+    monkeypatch.setattr(settings, "routstr_tee_cap_attestation_enabled", True)
+    monkeypatch.setattr(settings, "routstr_tee_cap_verifier_max_age_seconds", 300)
+    monkeypatch.setattr(settings, "routstr_tee_cap_status_cache_seconds", 30.0)
+    monkeypatch.setattr(
+        settings, "routstr_tee_cap_status_url", "http://127.0.0.1:8081/status"
+    )
+    monkeypatch.setattr(settings, "routstr_tee_cap_tee_domain", "example.tee.test")
+    monkeypatch.setattr(settings, "routstr_tee_cap_public_base_url", "")
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_client_confidentiality_boundary",
+        "attested-tls-termination",
+    )
+    monkeypatch.setattr(
+        "routstr.core.attestation._fetch_cap_attestation_status", fake_fetch
+    )
+    monkeypatch.setattr("routstr.core.attestation.time.time", lambda: now_wall)
+    monkeypatch.setattr(
+        "routstr.core.attestation.time.monotonic", lambda: now_monotonic
+    )
+
+    try:
+        first = get_routstr_tee_readiness()
+        assert first["ready"] is True
+
+        now_wall += 60
+        now_monotonic += 60
+        failed = get_routstr_tee_readiness()
+
+        assert calls == 2
+        assert failed["ready"] is False
+        assert "state is not unlocked" in str(failed["failure_reason"])
+
+        now_wall += 5
+        now_monotonic += 5
+        timed_out = get_routstr_tee_readiness()
+
+        assert calls == 3
+        assert timed_out["ready"] is False
+        assert "status endpoint stalled" in str(timed_out["failure_reason"])
+    finally:
+        _clear_cap_attestation_status_cache()
+
+
+def test_public_attestation_statement_redacts_cap_failure_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_fetch() -> dict[str, object]:
+        return {
+            "claims_error": "claims parser saw bearer sk-live-secret",
+            "claims_instance_id": "routstr-core-prod",
+            "claims_verified": False,
+            "config_ready": True,
+            "error": "local proxy diagnostic sk-live-secret",
+            "instance_id": "cap-org-routstr-core-prod",
+            "mode": "password",
+            "state": "locked",
+            "tenant_id": "cap-org-routstr-core-prod",
+            "tenant_instance_identity_hash": "a" * 64,
+        }
+
+    monkeypatch.setattr(settings, "confidential_routing_mode", "required")
+    monkeypatch.setattr(settings, "routstr_tee_attestation_required", True)
+    monkeypatch.setattr(settings, "routstr_tee_cap_attestation_enabled", True)
+    monkeypatch.setattr(
+        settings, "routstr_tee_cap_status_url", "http://127.0.0.1:8081/status"
+    )
+    monkeypatch.setattr(settings, "routstr_tee_cap_tee_domain", "example.tee.test")
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_cap_public_base_url",
+        "https://example.tee.test/.well-known/confidential",
+    )
+    monkeypatch.setattr(
+        settings,
+        "routstr_tee_client_confidentiality_boundary",
+        "attested-tls-termination",
+    )
+    monkeypatch.setattr(
+        "routstr.core.attestation._fetch_cap_attestation_status", fake_fetch
+    )
+    _clear_cap_attestation_status_cache()
+
+    try:
+        statement = get_routstr_attestation_statement()
+    finally:
+        _clear_cap_attestation_status_cache()
+
+    cap_attestation = statement["tee"]["cap_attestation"]
+    assert "failure_reason" not in cap_attestation
+    assert cap_attestation["failure_reason_digest"].startswith("sha256:")
+    assert "error" not in cap_attestation["status"]
+    assert "claims_error" not in cap_attestation["status"]
+    assert "sk-live-secret" not in json.dumps(statement)
+
+
 def test_routstr_tee_attestation_command_rejects_secret_argv_before_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

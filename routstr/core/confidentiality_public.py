@@ -981,7 +981,7 @@ def public_provider_proof_claims_cover_model_selectors(
         return False
     if attested != selected:
         return False
-    targets = _public_policy_targets(public_policy) if isinstance(public_policy, dict) else {}
+    targets = (_public_policy_targets(public_policy) or {}) if isinstance(public_policy, dict) else {}
     return all(
         _public_tinfoil_model_attestation_claims_satisfy_mode(
             model_attestations.get(model_id),
@@ -1266,7 +1266,7 @@ def public_provider_proof_claims(claims: object) -> dict[str, Any] | None:
     for key in sorted(PUBLIC_PROVIDER_PROOF_CLAIM_KEYS):
         value = claims.get(key)
         if key in PUBLIC_PROVIDER_DIGEST_PROOF_CLAIM_KEYS:
-            public_value = _public_sha256_digest(value)
+            public_value: str | list[str] | None = _public_sha256_digest(value)
         elif key in PUBLIC_PROVIDER_HEX64_PROOF_CLAIM_KEYS:
             public_value = _public_hex64(value)
         elif key == "transport":

@@ -77,5 +77,5 @@ For full instructions, see the **[Provider Quick Start Guide](https://docs.routs
 ```bash
 make setup
 cp .env.example .env
-fastapi run routstr
+uvicorn routstr:fastapi_app --host 0.0.0.0 --port 8000
 ```

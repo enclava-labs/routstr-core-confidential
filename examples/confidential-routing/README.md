@@ -25,6 +25,21 @@ environment-authoritative. Persisted settings and admin settings updates cannot
 weaken or authorize these controls after startup; change them in the deployment
 environment and restart/reload Routstr instead.
 
+To produce a best-effort CAP wrapper for an existing OCI image, use:
+
+```sh
+uv run python scripts/cap_image_wrapper.py \
+  ghcr.io/example/app:latest \
+  ghcr.io/example/app:cap \
+  --mode direct
+```
+
+The script writes a generated Dockerfile, a matching `enclava.toml`, and a
+small static launcher that CAP can run with `command =
+["/usr/local/bin/cap-wrap"]`. Use `--mode proxy` only for apps that can move
+their listen port through the `PORT` environment variable; proxy mode injects a
+plain `/health` response and forwards other requests to the child app.
+
 Validate edited provider policies before deployment:
 
 ```sh

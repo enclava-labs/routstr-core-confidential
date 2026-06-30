@@ -4,6 +4,7 @@ import math
 import secrets
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, RootModel
@@ -32,6 +33,9 @@ from .log_manager import log_manager
 from .logging import get_logger, redact_sensitive_text
 from .policy_secrets import inline_policy_secret_violations
 from .settings import SettingsService, settings
+
+if TYPE_CHECKING:
+    from ..upstream import BaseUpstreamProvider
 
 logger = get_logger(__name__)
 
@@ -1129,7 +1133,9 @@ def _validate_provider_fee(provider_fee: float | None) -> float | None:
     return provider_fee
 
 
-def _registered_provider_class(provider_type: str):
+def _registered_provider_class(
+    provider_type: str,
+) -> "type[BaseUpstreamProvider] | None":
     from ..upstream import upstream_provider_classes
 
     return next(

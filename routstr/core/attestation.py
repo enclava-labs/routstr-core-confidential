@@ -599,6 +599,11 @@ def _clear_cap_attestation_status_cache() -> None:
     _CAP_ATTESTATION_STATUS_CACHE.clear()
 
 
+def _discard_cap_attestation_status_cache(url: str | None) -> None:
+    if url is not None:
+        _CAP_ATTESTATION_STATUS_CACHE.pop(url, None)
+
+
 def _cached_cap_attestation_status(
     url: str,
     *,
@@ -835,6 +840,7 @@ def _cap_attestation_status_evidence() -> dict[str, Any]:
     base["status_digest"] = _sha256_json(safe_status)
     base["status_observed_at"] = now_wall
     if failure := _cap_status_failure(safe_status):
+        _discard_cap_attestation_status_cache(local_status_url)
         base["failure_reason"] = failure
         return base
 
@@ -1510,6 +1516,38 @@ def _public_status_without_raw_details(
     return public_status
 
 
+def _public_cap_attestation_statement(cap_attestation: dict[str, Any]) -> dict[str, Any]:
+    public_cap_attestation = dict(cap_attestation)
+    failure_reason = public_cap_attestation.get("failure_reason")
+    if isinstance(failure_reason, str) and failure_reason.strip():
+        public_cap_attestation["failure_reason_digest"] = _sha256_json(failure_reason)
+        public_cap_attestation.pop("failure_reason", None)
+
+    status = public_cap_attestation.get("status")
+    if isinstance(status, dict):
+        public_status: dict[str, Any] = {}
+        for key in (
+            "auto_unlock_enabled",
+            "ciphertext_backend",
+            "claims_instance_id",
+            "claims_verified",
+            "config_ready",
+            "instance_id",
+            "mode",
+            "state",
+            "tenant_id",
+            "tenant_instance_identity_hash",
+        ):
+            value = status.get(key)
+            if isinstance(value, (str, bool, int)) or value is None:
+                public_status[key] = value
+        if public_status:
+            public_cap_attestation["status"] = public_status
+        else:
+            public_cap_attestation.pop("status", None)
+    return public_cap_attestation
+
+
 def _public_tee_statement(tee: dict[str, Any]) -> dict[str, Any]:
     public_tee = dict(tee)
     failure_reason = public_tee.get("failure_reason")
@@ -1530,6 +1568,11 @@ def _public_tee_statement(tee: dict[str, Any]) -> dict[str, Any]:
             public_claim_keys=PUBLIC_ROUTSTR_TEE_PROOF_CLAIMS,
             public_verification_step_keys=PUBLIC_ROUTSTR_TEE_VERIFICATION_STEPS,
             verified_status_failure=_current_routstr_tee_verification_failure,
+        )
+    cap_attestation = public_tee.get("cap_attestation")
+    if isinstance(cap_attestation, dict):
+        public_tee["cap_attestation"] = _public_cap_attestation_statement(
+            cap_attestation
         )
     return public_tee
 
@@ -1859,7 +1902,7 @@ def _validate_routstr_tee_verifier_result(
         label="Routstr TEE",
     ):
         raise ValueError(verification_steps_failure)
-    claims["verification_steps"] = dict(raw_steps)
+    claims["verification_steps"] = dict(cast("dict[str, Any]", raw_steps))
 
     for required_claim in REQUIRED_ROUTSTR_TEE_PROOF_CLAIMS:
         if required_claim == "tee_report_data_hex":

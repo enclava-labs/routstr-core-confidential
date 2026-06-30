@@ -57,9 +57,9 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
         """Fetch all OpenRouter models."""
         models_data = await async_fetch_openrouter_models()
         models = [
-            Model(**model)
+            Model(**_model_data)
             for item in models_data
-            if (model := remote_model_without_public_proof(item)) is not None
+            if (_model_data := remote_model_without_public_proof(item)) is not None
         ]
         # manual alias for openai/text-embedding-ada-002 due to openrouter api bug
         for model in models:

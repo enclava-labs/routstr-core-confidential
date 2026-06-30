@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from sqlmodel import select
+from sqlmodel import col, select
 
 from .algorithm import (
     create_model_mappings,
@@ -790,7 +790,7 @@ async def _load_provider_model_attestations(
         return {}
     result = await session.exec(
         select(ProviderModelAttestationRow).where(
-            ProviderModelAttestationRow.provider_id.in_(provider_ids)
+            col(ProviderModelAttestationRow.provider_id).in_(provider_ids)
         )
     )
     rows = result.all()
@@ -1026,7 +1026,7 @@ def _public_confidentiality_policy(policy: object) -> dict[str, Any] | None:
             if not isinstance(value, dict):
                 return None
             public_bindings: dict[str, dict[str, Any]] = {}
-            seen_model_ids: set[str] = set()
+            seen_model_ids = set()
             for raw_model_id, raw_binding in value.items():
                 if not isinstance(raw_model_id, str) or not raw_model_id.strip():
                     return None

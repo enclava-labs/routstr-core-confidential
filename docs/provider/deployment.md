@@ -4,7 +4,7 @@ Production deployment guide for Routstr Provider nodes.
 
 ## All-in-One Docker Image (Preferred)
 
-The easiest way to deploy Routstr is using the all-in-one Docker image from Docker Hub, which includes both the FastAPI backend and the Next.js admin dashboard in a single container.
+The easiest way to deploy Routstr is using the all-in-one Docker image from the GitHub Container Registry, which includes both the FastAPI backend and the Next.js admin dashboard in a single container. The image is built from `Dockerfile.full` and published by CI on every push to `main`.
 
 ### Quick Start
 
@@ -14,7 +14,7 @@ docker run -d \
   -p 8000:8000 \
   -v routstr-data:/app/data \
   -e DATABASE_URL="sqlite:////app/data/routstr.db" \
-  9qeklajc/routstr:latest
+  ghcr.io/enclava-labs/routstr-core-confidential:latest
 ```
 
 Access your node:
@@ -29,7 +29,7 @@ version: '3.8'
 
 services:
   routstr:
-    image: 9qeklajc/routstr:latest
+    image: ghcr.io/enclava-labs/routstr-core-confidential:latest
     container_name: routstr
     restart: unless-stopped
     ports:
@@ -77,7 +77,7 @@ Add Tor to serve your node as a hidden service—no port forwarding needed.
 ```yaml
 services:
   routstr:
-    image: ghcr.io/routstr/proxy:latest
+    image: ghcr.io/enclava-labs/routstr-core-confidential:latest
     container_name: routstr
     restart: unless-stopped
     ports:
@@ -119,7 +119,7 @@ While everything can be configured via the dashboard, you can pre-configure sett
 ```yaml
 services:
   routstr:
-    image: ghcr.io/routstr/proxy:latest
+    image: ghcr.io/enclava-labs/routstr-core-confidential:latest
     environment:
       # Pre-configure upstream (optional)
       - UPSTREAM_BASE_URL=https://api.openai.com/v1
@@ -143,7 +143,7 @@ services:
 ```yaml
 services:
   routstr:
-    image: ghcr.io/routstr/proxy:latest
+    image: ghcr.io/enclava-labs/routstr-core-confidential:latest
     env_file:
       - .env
     volumes:

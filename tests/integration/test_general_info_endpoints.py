@@ -22,6 +22,26 @@ def _digest(label: str) -> str:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_health_endpoint_for_cap_runtime(
+    integration_client: AsyncClient,
+    db_snapshot: Any,
+) -> None:
+    await db_snapshot.capture()
+
+    response = await integration_client.get("/health")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.text == "ok\n"
+
+    diff = await db_snapshot.diff()
+    assert diff["api_keys"]["added"] == []
+    assert diff["api_keys"]["removed"] == []
+    assert diff["api_keys"]["modified"] == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_root_endpoint_structure_and_performance(
     integration_client: AsyncClient, db_snapshot: Any
 ) -> None:

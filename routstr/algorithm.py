@@ -7,7 +7,7 @@ import ipaddress
 import json
 import math
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 from urllib.parse import urlparse
 
 from .core.confidentiality_public import (
@@ -485,7 +485,7 @@ def _is_hex_string(value: object, *, length: int) -> bool:
     )
 
 
-def _is_strict_int(value: object) -> bool:
+def _is_strict_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 

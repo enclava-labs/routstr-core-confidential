@@ -69,8 +69,8 @@ markers = [
 requires = ["setuptools>=78.1.1", "wheel>=0.46.2"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["routstr"]
+[tool.setuptools.packages.find]
+include = ["routstr*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
@@ -85,11 +85,36 @@ check_untyped_defs = true
 disallow_untyped_calls = true
 disallow_incomplete_defs = true
 disallow_untyped_decorators = true
+# Strict type-checking covers the shipped package only. Tests, scripts,
+# migrations and examples are not part of the runtime artifact: tests rely on
+# untyped fixtures/mocks, scripts are operational tooling, and alembic
+# migrations reference dynamically-defined ``sa.sql`` symbols mypy cannot see.
+# ponytail: widen this list back to [] only if/when test typing is enforced.
+exclude = [
+    "tests/",
+    "scripts/",
+    "migrations/",
+    "examples/",
+    "verifiers/",
+    "build-docs.sh",
+    "build/",
+    "dist/",
+]
 
 [tool.uv]
 # cashu 0.20.1 is still the latest release and pins several vulnerable
-# runtime/build packages. Keep the override centralized until cashu relaxes
-# those caps or Routstr moves to a different Cashu client.
+# runtime/build packages (cryptography<44, fastapi<0.116, h11<0.15, httpx<0.26,
+# importlib-metadata<7, setuptools<76, wheel<0.42, and the deprecated ecdsa).
+# These overrides force current, patched versions instead. As a consequence
+# `uv pip check` reports ~8 cashu incompatibilities BY DESIGN; they are not
+# runtime errors (the full test suite passes) and cashu has no newer release
+# to relax them. Keep this block centralized until cashu relaxes those caps
+# or Routstr moves to a different Cashu client.
+#
+# Install path: this package is distributed as the Docker image
+# ghcr.io/enclava-labs/routstr-core-confidential, built with `uv sync` (which
+# honors these overrides). Plain `pip install` from the wheel is NOT
+# satisfiable because pip ignores [tool.uv] overrides.
 exclude-dependencies = [
     "ecdsa",
 ]
@@ -98,7 +123,7 @@ override-dependencies = [
     "fastapi>=0.138.0",
     "h11>=0.16.0",
     "httpx>=0.28.0",
-    "importlib-metadata>=8.0.0",
+    "importlib-metadata>=8.0.0,<9.0",
     "setuptools>=78.1.1",
     "wheel>=0.46.2",
 ]

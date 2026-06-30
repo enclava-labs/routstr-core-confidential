@@ -71,9 +71,9 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
         """Fetch Anthropic models from OpenRouter API filtered by anthropic source."""
         models_data = await async_fetch_openrouter_models(source_filter="anthropic")
         models = [
-            Model(**model)
+            Model(**_model_data)
             for item in models_data
-            if (model := remote_model_without_public_proof(item)) is not None
+            if (_model_data := remote_model_without_public_proof(item)) is not None
         ]
         for model in models:
             model.alias_ids = [self.transform_model_name(model.id)]

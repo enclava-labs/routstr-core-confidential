@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
 
-def _json_constant_rejecter(label: str):
+def _json_constant_rejecter(label: str) -> Callable[[str], None]:
     def reject_constant(value: str) -> None:
         raise ValueError(f"{label} must not contain {value}")
 

@@ -502,6 +502,7 @@ class BaseUpstreamProvider:
     """Provider for forwarding requests to an upstream AI service API."""
 
     provider_type: str = "base"
+    upstream_name: str = "base"
     default_base_url: str | None = None
     platform_url: str | None = None
 

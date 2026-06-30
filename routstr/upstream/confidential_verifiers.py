@@ -12,7 +12,7 @@ import shlex
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -292,7 +292,7 @@ def _require_canonical_json(value: object, label: str) -> None:
     require_canonical_json(value, label)
 
 
-def _json_constant_rejecter(label: str):
+def _json_constant_rejecter(label: str) -> Callable[[str], None]:
     def reject_constant(value: str) -> None:
         raise ValueError(f"{label} must not contain {value}")
 
@@ -890,7 +890,9 @@ def _is_sha256_digest_value(value: str) -> bool:
     return len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
 
 
-def _is_template_placeholder_digest_value(value: str) -> bool:
+def _is_template_placeholder_digest_value(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
     digest = value.strip().lower()
     if digest.startswith("sha256:"):
         digest = digest.removeprefix("sha256:")
@@ -1381,7 +1383,7 @@ def _tinfoil_model_attestations_required(policy: dict[str, Any]) -> bool:
 def _tinfoil_target_urls(target_policy: dict[str, Any]) -> tuple[str, str]:
     attestation_url = _policy_string(target_policy, "attestation_url")
     hpke_keys_url = _policy_string(target_policy, "hpke_keys_url")
-    origin = ""
+    origin: str | None = ""
     if attestation_url:
         origin, origin_issue = _absolute_https_origin(
             attestation_url,
@@ -1839,8 +1841,8 @@ def _privatemode_component_policy_consistency_violations(
             not isinstance(value, str) for value in expected_values + allowed_values
         ):
             continue
-        expected = {value.strip().lower() for value in expected_values if value.strip()}
-        allowed = {value.strip().lower() for value in allowed_values if value.strip()}
+        expected = {value.strip().lower() for value in expected_values if isinstance(value, str) and value.strip()}
+        allowed = {value.strip().lower() for value in allowed_values if isinstance(value, str) and value.strip()}
         if expected and allowed and not expected.issubset(allowed):
             violations.append(f"{claim_name} expected value must be allowed")
 
@@ -1853,8 +1855,8 @@ def _privatemode_component_policy_consistency_violations(
             not isinstance(value, str) for value in expected_values + allowed_values
         ):
             continue
-        expected = {value.strip() for value in expected_values if value.strip()}
-        allowed = {value.strip() for value in allowed_values if value.strip()}
+        expected = {value.strip() for value in expected_values if isinstance(value, str) and value.strip()}
+        allowed = {value.strip() for value in allowed_values if isinstance(value, str) and value.strip()}
         if expected and allowed and not expected.issubset(allowed):
             violations.append(f"{claim_name} expected value must be allowed")
     return violations

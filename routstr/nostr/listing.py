@@ -444,7 +444,7 @@ def _safe_listing_confidentiality_policy(value: object) -> dict[str, Any] | None
             if not isinstance(item, dict):
                 return None
             public_bindings: dict[str, dict[str, Any]] = {}
-            seen_model_ids: set[str] = set()
+            seen_model_ids = set()
             for raw_model_id, raw_binding in item.items():
                 if not isinstance(raw_model_id, str) or not raw_model_id.strip():
                     return None
@@ -676,7 +676,7 @@ def _build_confidentiality_listing_metadata(
         confidentiality_policy = _safe_listing_confidentiality_policy(
             provider.get("confidentiality_policy")
         )
-        provider_metadata = {
+        provider_metadata: dict[str, Any] = {
             "provider_type": provider_type,
             "confidentiality": _safe_listing_confidentiality_status(
                 confidentiality,

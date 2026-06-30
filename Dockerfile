@@ -20,9 +20,9 @@ WORKDIR /app
 COPY . .
 COPY docker/routstr-cap-entrypoint /usr/local/bin/routstr-cap-entrypoint
 
-RUN mkdir -p /app/data/logs /app/data/tmp /app/data/.cache /app/data/.config /app/data/.local/share \
+RUN mkdir -p /app/data/tmp /app/data/.cache /app/data/.config /app/data/.local/share /run/enclava/routstr-logs \
     && chmod 0755 /usr/local/bin/routstr-cap-entrypoint \
-    && chown -R 10001:10001 /app/data
+    && chown -R 10001:10001 /app/data /run/enclava
 
 ARG GIT_COMMIT=""
 ARG GIT_TAG=""
@@ -33,7 +33,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV ROUTSTR_DATA_DIR=/app/data
 ENV DATABASE_URL=sqlite+aiosqlite:////app/data/keys.db
-ENV ROUTSTR_LOG_DIR=/app/data/logs
+ENV ROUTSTR_LOG_DIR=/run/enclava/routstr-logs
 ENV HOME=/app/data
 ENV TMPDIR=/app/data/tmp
 ENV XDG_CACHE_HOME=/app/data/.cache

@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -34,6 +35,13 @@ def test_env_example_surfaces_confidential_routing_deployment_knobs() -> None:
     assert "examples/confidential-routing/" in contents
     for env_var in CONFIDENTIAL_ENV_VARS:
         assert env_var in contents
+    policy_line = next(
+        line
+        for line in contents.splitlines()
+        if line.startswith("# ROUTSTR_TEE_VERIFIER_POLICY_JSON=")
+    )
+    policy_json = policy_line.removeprefix("# ROUTSTR_TEE_VERIFIER_POLICY_JSON=")
+    assert isinstance(json.loads(policy_json), dict)
 
 
 def test_confidential_routing_required_defaults_to_provider_attestation_only(

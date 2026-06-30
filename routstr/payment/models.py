@@ -4,7 +4,7 @@ import json
 import math
 import random
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 from fastapi import APIRouter, Depends, Request
@@ -146,7 +146,7 @@ def _public_model_confidentiality_policy(value: object) -> dict[str, Any] | None
     return public or None
 
 
-def _json_constant_rejecter(label: str):
+def _json_constant_rejecter(label: str) -> Callable[[str], None]:
     def reject_constant(value: str) -> None:
         raise ValueError(f"{label} must not contain {value}")
 
@@ -303,7 +303,7 @@ def _public_model_confidentiality(
     ):
         if key not in value:
             continue
-        public_value = _public_string(value[key])
+        public_value: str | int | list[str] | None = _public_string(value[key])
         if public_value is None:
             return None
         public[key] = public_value
@@ -533,7 +533,7 @@ def _row_to_model(
     )
     capabilities = (
         _loads_strict_json(row.capabilities_json, "model capabilities_json")
-        if getattr(row, "capabilities_json", None)
+        if row.capabilities_json
         else {}
     )
     supported_endpoints = None

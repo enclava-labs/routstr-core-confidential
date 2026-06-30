@@ -2,7 +2,7 @@
 set -eu
 
 : "${ROUTSTR_DATA_DIR:=/app/data}"
-: "${ROUTSTR_LOG_DIR:=${ROUTSTR_DATA_DIR}/logs}"
+: "${ROUTSTR_LOG_DIR:=/run/enclava/routstr-logs}"
 : "${TMPDIR:=${ROUTSTR_DATA_DIR}/tmp}"
 : "${XDG_CACHE_HOME:=${ROUTSTR_DATA_DIR}/.cache}"
 : "${XDG_CONFIG_HOME:=${ROUTSTR_DATA_DIR}/.config}"
@@ -25,4 +25,4 @@ mkdir -p \
   "${XDG_CONFIG_HOME}" \
   "${XDG_DATA_HOME}"
 
-exec /.venv/bin/fastapi run routstr --host 0.0.0.0 --port "${PORT}"
+exec /.venv/bin/uvicorn routstr:fastapi_app --host 0.0.0.0 --port "${PORT}"
